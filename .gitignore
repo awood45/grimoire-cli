@@ -1,0 +1,40 @@
+# Go build artifacts
+/grimoire-cli
+
+# Claude Code
+.claude/
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Database files
+*.db
+*.sqlite
+
+# Test binary
+*.test
+
+# Coverage output
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Reviews
+reviews/
+
+# OS
+.DS_Store
+Thumbs.db

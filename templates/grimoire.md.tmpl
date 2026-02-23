@@ -1,0 +1,107 @@
+# Grimoire
+
+A shared, file-based knowledge store for AI agents and their human collaborators.
+
+## Overview
+
+This grimoire stores markdown files with structured metadata, enabling agents to persist knowledge, share context, and search across accumulated information. All files live under the `files/` directory with YAML frontmatter for metadata.
+
+## Directory Structure
+
+```
+files/          Tracked markdown files (organized by agent or topic)
+archive-files/  Archived files (removed from active use, metadata stripped)
+db/             SQLite database (search index, rebuilt from ledger)
+config.yaml     Configuration (embedding provider, model, paths)
+ledger.jsonl    Append-only mutation log (source of truth for DB)
+grimoire.md     This file (auto-generated, refreshed by `status`)
+```
+
+## Agent Conventions
+
+- **Folder ownership:** Agents SHOULD organize files into subdirectories under `files/` by topic or agent name (e.g., `files/research/`, `files/claude/`).
+- **File naming:** Use lowercase, hyphen-separated names with `.md` extension (e.g., `api-design-notes.md`).
+- **One concept per file:** Keep files focused on a single topic for better searchability.
+- **Always create metadata:** After creating a file, register it with `create-file-metadata` so it is indexed and searchable.
+
+## Tag Style Guide
+
+- **Casing:** Always lowercase (e.g., `design`, `bug-fix`).
+- **Word separation:** Use hyphens (e.g., `api-design`, not `api_design` or `apiDesign`).
+- **Namespacing:** Use `/` for hierarchical tags (e.g., `project/backend`, `lang/go`).
+- **Consistency:** Reuse existing tags when possible. Run `grimoire-cli list-tags` to see current tags.
+- **Recommended patterns:**
+  - `type/` — content type (`type/decision`, `type/research`, `type/meeting-notes`)
+  - `project/` — project name (`project/grimoire`, `project/webapp`)
+  - `lang/` — programming language (`lang/go`, `lang/python`)
+  - `status/` — lifecycle (`status/draft`, `status/final`, `status/archived`)
+
+## YAML Frontmatter Format
+
+Every tracked file has YAML frontmatter managed by the CLI:
+
+```yaml
+---
+tags:
+  - tag-one
+  - tag-two
+source_agent: agent-name
+created_at: "2024-01-15T10:30:00Z"
+updated_at: "2024-01-15T10:30:00Z"
+summary: "Optional one-line summary of the file contents"
+---
+```
+
+- `tags` — list of string tags (see Tag Style Guide above)
+- `source_agent` — name of the agent that created or last modified the metadata
+- `created_at` / `updated_at` — RFC 3339 timestamps (managed by CLI)
+- `summary` — optional short description of the file
+
+Do not manually edit frontmatter fields managed by the CLI (`created_at`, `updated_at`). Use `update-file-metadata` to change tags, source agent, or summary.
+
+## CLI Command Reference
+
+All commands return JSON to stdout. Errors go to stderr with a non-zero exit code.
+
+| Command | Description |
+|---------|-------------|
+| `grimoire-cli init` | Initialize a new grimoire |
+| `grimoire-cli create-file-metadata --file <path> --source-agent <name> --tags <t1,t2>` | Register metadata for a file |
+| `grimoire-cli update-file-metadata --file <path> [--tags <t1,t2>] [--source-agent <name>] [--summary <text>]` | Update file metadata |
+| `grimoire-cli get-file-metadata --file <path>` | Retrieve metadata for a file |
+| `grimoire-cli delete-file-metadata --file <path>` | Remove metadata for a file |
+| `grimoire-cli archive-file --file <path>` | Archive a file and strip metadata |
+| `grimoire-cli search [--tag <t>] [--any-tag <t>] [--source-agent <name>] [--after <date>] [--before <date>]` | Search by metadata filters |
+| `grimoire-cli similar --file <path>` or `--text <query>` | Find similar files by content |
+| `grimoire-cli list-tags` | List all tags with counts |
+| `grimoire-cli status` | Show health check and statistics |
+| `grimoire-cli rebuild` | Recreate DB from ledger |
+| `grimoire-cli hard-rebuild` | Recreate DB and ledger from files |
+
+---
+
+## Current Status
+{{if .LastActivity.IsZero}}
+*No activity recorded yet. Run `grimoire-cli status` after creating some files.*
+{{else}}
+**Last updated:** {{.LastActivity.Format "2006-01-02T15:04:05Z07:00"}}
+
+| Metric | Count |
+|--------|-------|
+| Total files in `files/` | {{.TotalFiles}} |
+| Tracked (with metadata) | {{.TrackedFiles}} |
+| Orphaned (metadata but no file) | {{.OrphanedCount}} |
+| Untracked (file but no metadata) | {{.UntrackedCount}} |
+{{if .TagInventory}}
+### Tag Inventory
+
+| Tag | Files |
+|-----|-------|
+{{range .TagInventory}}| `{{.Name}}` | {{.Count}} |
+{{end}}{{end}}{{if .AgentSummary}}
+### Agent Activity
+
+| Agent | Files |
+|-------|-------|
+{{range .AgentSummary}}| {{.Name}} | {{.FileCount}} |
+{{end}}{{end}}{{end}}
