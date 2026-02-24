@@ -13,6 +13,11 @@ const (
 
 	// Environment variable name for overriding the base path.
 	envBasePath = "GRIMOIRE_PATH"
+
+	// Environment variable name for overriding the home directory used by
+	// platform detection. Intended for testing; when set, the init command
+	// uses this value instead of os.UserHomeDir().
+	envHomePath = "GRIMOIRE_HOME"
 )
 
 // NewRootCommand creates the root cobra command with persistent flags.

@@ -49,7 +49,7 @@ func TestInitCommand_flags(t *testing.T) {
 
 // TestInitCommand_success verifies init creates a grimoire (FR-3.1.1).
 func TestInitCommand_success(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GRIMOIRE_HOME", t.TempDir())
 
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "test-brain")
@@ -76,7 +76,7 @@ func TestInitCommand_success(t *testing.T) {
 
 // TestInitCommand_alreadyExists verifies init fails without --force (FR-3.1.1).
 func TestInitCommand_alreadyExists(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GRIMOIRE_HOME", t.TempDir())
 
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "test-brain")
@@ -106,7 +106,7 @@ func TestInitCommand_alreadyExists(t *testing.T) {
 
 // TestInitCommand_force verifies init with --force reinitializes (FR-3.1.1).
 func TestInitCommand_force(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GRIMOIRE_HOME", t.TempDir())
 
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "test-brain")
@@ -139,7 +139,7 @@ func TestInitCommand_force(t *testing.T) {
 
 // TestInitCommand_embeddingFlags verifies embedding flags are passed through (FR-3.1.1).
 func TestInitCommand_embeddingFlags(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GRIMOIRE_HOME", t.TempDir())
 
 	tmpDir := t.TempDir()
 	basePath := filepath.Join(tmpDir, "test-brain")

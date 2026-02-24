@@ -51,8 +51,10 @@ func TestInstallSkills_claudeCode(t *testing.T) {
 	skillContent, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(skillContent), brainPath)
-	// Verify the template placeholder was replaced.
+	// Verify no template placeholders remain.
 	assert.NotContains(t, string(skillContent), "{{.BasePath}}")
+	assert.NotContains(t, string(skillContent), "{{if ")
+	assert.NotContains(t, string(skillContent), "{{end}}")
 
 	// Verify CLAUDE.md was updated.
 	claudeMDPath := filepath.Join(homeDir, ".claude", "CLAUDE.md")

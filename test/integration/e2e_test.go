@@ -63,8 +63,31 @@ type e2eErrorDetail struct {
 // parsed envelope, raw stdout, raw stderr, and any exec error.
 func runE2ECLI(t *testing.T, args ...string) (env e2eEnvelope, stdout, stderr string, exitErr error) {
 	t.Helper()
+	return runE2ECLIWithEnv(t, nil, args...)
+}
+
+// runE2ECLIWithEnv executes the CLI binary with extra environment variables.
+// Each entry in extraEnv should be in "KEY=VALUE" format. GRIMOIRE_HOME is
+// always set to an empty temp directory unless explicitly provided in extraEnv,
+// ensuring tests never write to the real ~/.claude/.
+func runE2ECLIWithEnv(t *testing.T, extraEnv []string, args ...string) (env e2eEnvelope, stdout, stderr string, exitErr error) {
+	t.Helper()
 
 	cmd := exec.Command(e2eBinaryPath, args...)
+
+	// Default GRIMOIRE_HOME to an empty temp dir for isolation.
+	hasHome := false
+	for _, e := range extraEnv {
+		if len(e) >= 14 && e[:14] == "GRIMOIRE_HOME=" {
+			hasHome = true
+			break
+		}
+	}
+	if !hasHome {
+		extraEnv = append(extraEnv, "GRIMOIRE_HOME="+t.TempDir())
+	}
+	cmd.Env = append(os.Environ(), extraEnv...)
+
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -336,4 +359,39 @@ func TestEndToEnd_ErrorCases(t *testing.T) {
 		require.ErrorAs(t, err, &exitErr)
 		assert.NotEqual(t, 0, exitErr.ExitCode())
 	})
+}
+
+// TestEndToEnd_GrimoireHomeIsolation verifies that setting GRIMOIRE_HOME
+// directs platform detection to a temp directory instead of the real home.
+func TestEndToEnd_GrimoireHomeIsolation(t *testing.T) {
+	e2eBinaryPath = buildE2EBinary(t)
+
+	brainDir := t.TempDir()
+
+	// Create a fake home with .claude/ so platform detection triggers.
+	fakeHome := t.TempDir()
+	claudeDir := filepath.Join(fakeHome, ".claude")
+	require.NoError(t, os.MkdirAll(claudeDir, 0o755))
+
+	// Run init with GRIMOIRE_HOME pointing to our fake home.
+	env, stdout, stderr, err := runE2ECLIWithEnv(t,
+		[]string{"GRIMOIRE_HOME=" + fakeHome},
+		"init", "--path", brainDir,
+	)
+	require.NoError(t, err, "init failed: stderr=%s stdout=%s", stderr, stdout)
+	require.True(t, env.OK, "expected ok=true, got stdout=%s", stdout)
+
+	// Skill file should be written under the fake home, not the real home.
+	skillPath := filepath.Join(fakeHome, ".claude", "commands", "write-to-grimoire.md")
+	skillContent, err := os.ReadFile(skillPath)
+	require.NoError(t, err, "skill file should exist under GRIMOIRE_HOME")
+	assert.Contains(t, string(skillContent), brainDir,
+		"skill file should reference the brain path")
+
+	// CLAUDE.md should be written under the fake home.
+	claudeMDPath := filepath.Join(fakeHome, ".claude", "CLAUDE.md")
+	claudeContent, err := os.ReadFile(claudeMDPath)
+	require.NoError(t, err, "CLAUDE.md should exist under GRIMOIRE_HOME")
+	assert.Contains(t, string(claudeContent), "grimoire-integration",
+		"CLAUDE.md should contain the grimoire snippet")
 }

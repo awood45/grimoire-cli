@@ -30,12 +30,12 @@ Write a markdown file into the grimoire and create or update its metadata in a s
 
 5. **If metadata does NOT exist** (command returns an error), create it:
    ```bash
-   grimoire-cli create-file-metadata --file "<path>" --source-agent "<source_agent>" --tags "<tags>" {{if .Summary}}--summary "<summary>"{{end}}
+   grimoire-cli create-file-metadata --file "<path>" --source-agent "<source_agent>" --tags "<tags>" --summary "<summary>"
    ```
 
 6. **If metadata already exists** (command succeeds), update it:
    ```bash
-   grimoire-cli update-file-metadata --file "<path>" --source-agent "<source_agent>" --tags "<tags>" {{if .Summary}}--summary "<summary>"{{end}}
+   grimoire-cli update-file-metadata --file "<path>" --source-agent "<source_agent>" --tags "<tags>" --summary "<summary>"
    ```
 
 7. **Return the metadata** from the create or update command as confirmation.
