@@ -41,9 +41,9 @@ func runInit(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "" // Best-effort: platform detection works with limited info.
+	homeDir := os.Getenv(envHomePath)
+	if homeDir == "" {
+		homeDir, _ = os.UserHomeDir()
 	}
 	detector := platform.NewDetector(homeDir)
 
