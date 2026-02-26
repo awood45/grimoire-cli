@@ -32,7 +32,7 @@ type Service struct {
 	embRepo  store.EmbeddingRepository
 	ledger   ledger.Ledger
 	fm       frontmatter.Service
-	embedder embedding.Provider
+	embGen   *embedding.Generator
 	locker   filelock.Locker
 	docGen   docgen.Generator
 	db       DBManager
@@ -45,7 +45,7 @@ func NewService(
 	embRepo store.EmbeddingRepository,
 	l ledger.Ledger,
 	fm frontmatter.Service,
-	embedder embedding.Provider,
+	embGen *embedding.Generator,
 	locker filelock.Locker,
 	docGen docgen.Generator,
 	db DBManager,
@@ -56,7 +56,7 @@ func NewService(
 		embRepo:  embRepo,
 		ledger:   l,
 		fm:       fm,
-		embedder: embedder,
+		embGen:   embGen,
 		locker:   locker,
 		docGen:   docGen,
 		db:       db,
@@ -97,6 +97,9 @@ func (s *Service) Status(ctx context.Context) (StatusReport, error) {
 
 	// Get DB size and embedding status.
 	s.fillDBAndEmbeddingStatus(&report)
+
+	// Detect stale embeddings (FR-12).
+	s.detectStaleEmbeddings(ctx, &report)
 
 	// Build DocData and refresh grimoire.md.
 	if err := s.refreshDoc(ctx, &report); err != nil {
@@ -152,9 +155,31 @@ func (s *Service) fillDBAndEmbeddingStatus(report *StatusReport) {
 		report.DBSizeBytes = dbStat.Size()
 	}
 
-	report.EmbeddingStatus = s.embedder.ModelID()
+	report.EmbeddingStatus = s.embGen.ModelID()
 	if report.EmbeddingStatus == "" {
 		report.EmbeddingStatus = "not configured"
+	}
+}
+
+// detectStaleEmbeddings checks for v1-era embeddings that need re-generation (FR-12).
+// V1 embeddings are identified by chunk_end == 0: the v2 Generator always sets chunk_end
+// to the actual byte offset (> 0 for any non-empty content), while v1 embeddings default
+// to 0 during migration. Summary embeddings (IsSummary=true) are excluded because they
+// represent AI-generated text and legitimately have zero byte-range offsets.
+func (s *Service) detectStaleEmbeddings(ctx context.Context, report *StatusReport) {
+	allEmbs, err := s.embRepo.GetAll(ctx)
+	if err != nil {
+		// Non-fatal: we just skip stale detection if we cannot read embeddings.
+		return
+	}
+
+	for i := range allEmbs {
+		emb := &allEmbs[i]
+		if !emb.IsSummary && emb.ChunkIndex == 0 && emb.ChunkStart == 0 && emb.ChunkEnd == 0 {
+			report.EmbeddingSchemaStale = true
+			report.EmbeddingSchemaMessage = "Embeddings were generated with schema v1. Run 'grimoire-cli hard-rebuild' to re-generate with chunking and prefixes."
+			return
+		}
 	}
 }
 
@@ -555,7 +580,11 @@ func (s *Service) handleUntracked(ctx context.Context, relPath string, meta *sto
 		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to insert untracked file")
 	}
 
-	return s.generateAndUpsertEmbedding(ctx, relPath)
+	absPath, err := s.brain.ResolveFilePath(relPath)
+	if err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeInternalError, "failed to resolve file path for embedding")
+	}
+	return s.embGen.GenerateForFile(ctx, relPath, absPath)
 }
 
 // handleStale processes a stale file (DB differs from frontmatter).
@@ -578,7 +607,11 @@ func (s *Service) handleStale(ctx context.Context, relPath string, meta *store.F
 		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to update stale file")
 	}
 
-	return s.generateAndUpsertEmbedding(ctx, relPath)
+	absPath, err := s.brain.ResolveFilePath(relPath)
+	if err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeInternalError, "failed to resolve file path for embedding")
+	}
+	return s.embGen.GenerateForFile(ctx, relPath, absPath)
 }
 
 // appendLedgerEntry builds and appends a ledger entry for create or update operations.
@@ -635,35 +668,11 @@ func (s *Service) handleOrphaned(ctx context.Context, relPath string) error {
 	}
 
 	// Delete embedding first (may not exist, ignore errors).
-	_ = s.embRepo.Delete(ctx, relPath) //nolint:errcheck // Best-effort embedding deletion.
+	_ = s.embRepo.DeleteForFile(ctx, relPath) //nolint:errcheck // Best-effort embedding deletion.
 
 	// Delete from DB.
 	if err := s.fileRepo.Delete(ctx, relPath); err != nil {
 		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to delete orphaned record")
-	}
-
-	return nil
-}
-
-// generateAndUpsertEmbedding reads file content and generates/stores an embedding.
-func (s *Service) generateAndUpsertEmbedding(ctx context.Context, relPath string) error {
-	absPath, err := s.brain.ResolveFilePath(relPath)
-	if err != nil {
-		return sberrors.Wrap(err, sberrors.ErrCodeInternalError, "failed to resolve file path for embedding")
-	}
-
-	content, err := os.ReadFile(absPath)
-	if err != nil {
-		return sberrors.Wrap(err, sberrors.ErrCodeInternalError, "failed to read file for embedding")
-	}
-
-	vector, err := s.embedder.GenerateEmbedding(ctx, string(content))
-	if err != nil {
-		return sberrors.Wrap(err, sberrors.ErrCodeEmbeddingError, "failed to generate embedding")
-	}
-
-	if err := s.embRepo.Upsert(ctx, relPath, vector, s.embedder.ModelID()); err != nil {
-		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to upsert embedding")
 	}
 
 	return nil

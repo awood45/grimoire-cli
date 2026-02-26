@@ -118,3 +118,71 @@ func (d *DB) DropAll() error {
 func (d *DB) SQLDB() *sql.DB {
 	return d.db
 }
+
+// currentVersion reads the current schema version from PRAGMA user_version.
+func (d *DB) currentVersion() (int, error) {
+	var version int
+	if err := d.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return 0, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to read schema version")
+	}
+	return version, nil
+}
+
+// MigrateIfNeeded checks the current schema version and runs migrations if necessary.
+// Returns nil if already at the current version.
+// For fresh databases (version 0), this creates the v2 schema directly via EnsureSchema.
+// This dual role is intentional: it allows non-init commands to self-heal if the DB
+// exists but has no schema (e.g., after a DB recreation).
+func (d *DB) MigrateIfNeeded() error {
+	current, err := d.currentVersion()
+	if err != nil {
+		return err
+	}
+	if current == 0 {
+		// Fresh DB -- create v2 schema directly.
+		return d.EnsureSchema()
+	}
+	if current == SchemaVersion {
+		return nil
+	}
+	if current == 1 {
+		return d.migrateV1ToV2()
+	}
+	return sberrors.Newf(sberrors.ErrCodeDatabaseError,
+		"unknown schema version %d (expected %d)", current, SchemaVersion)
+}
+
+// migrateV1ToV2 runs the v1->v2 table-swap migration in a transaction.
+func (d *DB) migrateV1ToV2() error {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to begin migration transaction")
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback on commit is a no-op
+
+	steps := []string{
+		migrateEmbeddingsV1ToV2,
+		migrateEmbeddingsCopyV1,
+		migrateEmbeddingsDropV1,
+		migrateEmbeddingsRenameV2,
+	}
+
+	for _, stmt := range steps {
+		if _, err := tx.Exec(stmt); err != nil {
+			return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to execute migration step")
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to commit migration transaction")
+	}
+
+	// Bump schema version only after the DDL changes committed successfully.
+	// This is done outside the transaction to ensure the version is never bumped
+	// without the corresponding schema changes persisting.
+	if _, err := d.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to set schema version after migration")
+	}
+
+	return nil
+}

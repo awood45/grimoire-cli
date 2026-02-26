@@ -37,7 +37,7 @@ func runListTags(cmd *cobra.Command, _ []string) error {
 	defer appCtx.Close() //nolint:errcheck // Best-effort cleanup.
 
 	// List tags.
-	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder)
+	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder, appCtx.Config.Embedding.QueryPrefix)
 	results, listErr := engine.ListTags(context.Background(), sortOrder)
 	if listErr != nil {
 		WriteError(out, listErr)

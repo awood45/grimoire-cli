@@ -16,8 +16,9 @@ type FileRepository interface {
 
 // EmbeddingRepository defines persistence operations for vector embeddings.
 type EmbeddingRepository interface {
-	Upsert(ctx context.Context, filepath string, vector []float32, modelID string) error
+	Upsert(ctx context.Context, emb Embedding) error
 	Get(ctx context.Context, filepath string) (Embedding, error)
-	Delete(ctx context.Context, filepath string) error
+	GetForFile(ctx context.Context, filepath string) ([]Embedding, error)
+	DeleteForFile(ctx context.Context, filepath string) error
 	GetAll(ctx context.Context) ([]Embedding, error)
 }

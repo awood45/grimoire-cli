@@ -121,6 +121,27 @@ func TestWriteError_wrappedError(t *testing.T) {
 	assert.Equal(t, "failed to write", errObj["message"])
 }
 
+// TestWriteSuccessWithWarning_format verifies the warning envelope matches {"ok": true, "data": {...}, "warning": "..."} (FR-11).
+func TestWriteSuccessWithWarning_format(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	data := map[string]string{"filepath": "notes/test.md"}
+	WriteSuccessWithWarning(&buf, data, "embedding generation failed")
+
+	var envelope map[string]interface{}
+	err := json.Unmarshal(buf.Bytes(), &envelope)
+	require.NoError(t, err)
+
+	assert.Equal(t, true, envelope["ok"])
+	assert.NotNil(t, envelope["data"])
+	assert.Equal(t, "embedding generation failed", envelope["warning"])
+
+	dataMap, ok := envelope["data"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "notes/test.md", dataMap["filepath"])
+}
+
 // TestWriteError_unknownError verifies non-*sberrors.Error is wrapped as INTERNAL_ERROR (NFR-6.5).
 func TestWriteError_unknownError(t *testing.T) {
 	t.Parallel()

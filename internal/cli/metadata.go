@@ -5,6 +5,7 @@ import (
 
 	"github.com/awood45/grimoire-cli/internal/brain"
 	"github.com/awood45/grimoire-cli/internal/metadata"
+	"github.com/awood45/grimoire-cli/internal/sberrors"
 	"github.com/spf13/cobra"
 )
 
@@ -21,6 +22,7 @@ func newCreateFileMetadataCommand() *cobra.Command {
 	cmd.Flags().String("source-agent", "", "name of the agent creating the metadata")
 	cmd.Flags().StringSlice("tags", nil, "tags to associate with the file (repeatable)")
 	cmd.Flags().String("summary", "", "optional summary of the file contents")
+	cmd.Flags().String("summary-embedding-text", "", "optional text to embed as a summary vector for large files")
 
 	//nolint:errcheck // Required flags cannot fail to be marked.
 	cmd.MarkFlagRequired("file")
@@ -45,6 +47,7 @@ func newUpdateFileMetadataCommand() *cobra.Command {
 	cmd.Flags().StringSlice("tags", nil, "new tags to replace existing tags")
 	cmd.Flags().String("source-agent", "", "new source agent name")
 	cmd.Flags().String("summary", "", "new summary for the file")
+	cmd.Flags().String("summary-embedding-text", "", "optional text to embed as a summary vector for large files")
 
 	//nolint:errcheck // Required flags cannot fail to be marked.
 	cmd.MarkFlagRequired("file")
@@ -91,10 +94,11 @@ func runCreateFileMetadata(cmd *cobra.Command, _ []string) error {
 	out := cmd.OutOrStdout()
 	basePath := ResolveBasePath(cmd)
 
-	fp, _ := cmd.Flags().GetString("file")                  //nolint:errcheck // Flag defined on this command.
-	sourceAgent, _ := cmd.Flags().GetString("source-agent") //nolint:errcheck // Flag defined on this command.
-	tags, _ := cmd.Flags().GetStringSlice("tags")           //nolint:errcheck // Flag defined on this command.
-	summary, _ := cmd.Flags().GetString("summary")          //nolint:errcheck // Flag defined on this command.
+	fp, _ := cmd.Flags().GetString("file")                               //nolint:errcheck // Flag defined on this command.
+	sourceAgent, _ := cmd.Flags().GetString("source-agent")              //nolint:errcheck // Flag defined on this command.
+	tags, _ := cmd.Flags().GetStringSlice("tags")                        //nolint:errcheck // Flag defined on this command.
+	summary, _ := cmd.Flags().GetString("summary")                       //nolint:errcheck // Flag defined on this command.
+	summaryEmbText, _ := cmd.Flags().GetString("summary-embedding-text") //nolint:errcheck // Flag defined on this command.
 
 	// Validate markdown extension.
 	b := brain.New(basePath)
@@ -134,18 +138,23 @@ func runCreateFileMetadata(cmd *cobra.Command, _ []string) error {
 	// Create metadata.
 	manager := metadata.NewManager(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder, appCtx.Locker,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen, appCtx.Locker,
 	)
 
 	opts := metadata.CreateOptions{
-		Filepath:    fp,
-		SourceAgent: sourceAgent,
-		Tags:        tags,
-		Summary:     summary,
+		Filepath:             fp,
+		SourceAgent:          sourceAgent,
+		Tags:                 tags,
+		Summary:              summary,
+		SummaryEmbeddingText: summaryEmbText,
 	}
 
 	result, createErr := manager.Create(context.Background(), opts)
 	if createErr != nil {
+		if sberrors.HasCode(createErr, sberrors.ErrCodeEmbeddingWarning) {
+			WriteSuccessWithWarning(out, result, createErr.Error())
+			return nil
+		}
 		WriteError(out, createErr)
 		return nil
 	}
@@ -200,6 +209,11 @@ func runUpdateFileMetadata(cmd *cobra.Command, _ []string) error {
 		opts.Summary = &summary
 	}
 
+	if cmd.Flags().Changed("summary-embedding-text") {
+		summaryEmbText, _ := cmd.Flags().GetString("summary-embedding-text") //nolint:errcheck // Flag defined on this command.
+		opts.SummaryEmbeddingText = &summaryEmbText
+	}
+
 	// Build AppContext.
 	appCtx, err := NewAppContext(basePath)
 	if err != nil {
@@ -211,11 +225,15 @@ func runUpdateFileMetadata(cmd *cobra.Command, _ []string) error {
 	// Update metadata.
 	manager := metadata.NewManager(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder, appCtx.Locker,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen, appCtx.Locker,
 	)
 
 	result, updateErr := manager.Update(context.Background(), opts)
 	if updateErr != nil {
+		if sberrors.HasCode(updateErr, sberrors.ErrCodeEmbeddingWarning) {
+			WriteSuccessWithWarning(out, result, updateErr.Error())
+			return nil
+		}
 		WriteError(out, updateErr)
 		return nil
 	}
@@ -242,7 +260,7 @@ func runGetFileMetadata(cmd *cobra.Command, _ []string) error {
 	// Get metadata.
 	manager := metadata.NewManager(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder, appCtx.Locker,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen, appCtx.Locker,
 	)
 
 	result, getErr := manager.Get(context.Background(), fp)
@@ -273,7 +291,7 @@ func runDeleteFileMetadata(cmd *cobra.Command, _ []string) error {
 	// Delete metadata.
 	manager := metadata.NewManager(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder, appCtx.Locker,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen, appCtx.Locker,
 	)
 
 	if deleteErr := manager.Delete(context.Background(), fp); deleteErr != nil {

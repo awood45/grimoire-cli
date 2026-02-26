@@ -91,6 +91,7 @@ func TestCreateMetadataCommand_flags(t *testing.T) {
 	assert.NotNil(t, cmd.Flags().Lookup("source-agent"))
 	assert.NotNil(t, cmd.Flags().Lookup("tags"))
 	assert.NotNil(t, cmd.Flags().Lookup("summary"))
+	assert.NotNil(t, cmd.Flags().Lookup("summary-embedding-text"))
 }
 
 // TestUpdateMetadataCommand_flags verifies expected flags exist (FR-3.2.2).
@@ -111,6 +112,7 @@ func TestUpdateMetadataCommand_flags(t *testing.T) {
 	assert.NotNil(t, cmd.Flags().Lookup("source-agent"))
 	assert.NotNil(t, cmd.Flags().Lookup("tags"))
 	assert.NotNil(t, cmd.Flags().Lookup("summary"))
+	assert.NotNil(t, cmd.Flags().Lookup("summary-embedding-text"))
 }
 
 // TestGetMetadataCommand_flags verifies expected flags exist (FR-3.2.3).
@@ -276,6 +278,32 @@ func TestCreateMetadataCommand_success(t *testing.T) {
 		"--file", "test.md", "--source-agent", "test-agent",
 		"--tags", "meeting-notes", "--tags", "project/backend",
 		"--summary", "A test summary"})
+	require.NoError(t, root.Execute())
+
+	var envelope map[string]interface{}
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &envelope))
+	assert.Equal(t, true, envelope["ok"])
+	assert.NotNil(t, envelope["data"])
+}
+
+// TestCreateMetadataCommand_withSummaryEmbeddingText verifies the --summary-embedding-text flag is accepted (FR-7).
+func TestCreateMetadataCommand_withSummaryEmbeddingText(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	basePath := filepath.Join(tmpDir, "test-brain")
+	setupGrimoire(t, basePath, nil)
+
+	// Create a test file.
+	require.NoError(t, os.WriteFile(filepath.Join(basePath, "files", "test.md"), []byte("# Test"), 0o600))
+
+	root := NewRootCommand()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetArgs([]string{"create-file-metadata", "--path", basePath,
+		"--file", "test.md", "--source-agent", "test-agent",
+		"--tags", "notes",
+		"--summary-embedding-text", "This is a summary for embedding"})
 	require.NoError(t, root.Execute())
 
 	var envelope map[string]interface{}

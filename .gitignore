@@ -32,8 +32,10 @@ go.work.sum
 *.swo
 *~
 
-# Reviews
+# Docs and Reviews
 reviews/
+design/
+plan/
 
 # OS
 .DS_Store

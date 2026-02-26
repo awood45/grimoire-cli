@@ -24,6 +24,7 @@ type AppContext struct {
 	EmbRepo  store.EmbeddingRepository
 	Ledger   ledger.Ledger
 	Embedder embedding.Provider
+	EmbGen   *embedding.Generator
 	FM       frontmatter.Service
 	Locker   filelock.Locker
 	DocGen   docgen.Generator
@@ -63,6 +64,12 @@ func newAppContext(basePath string, checkVersion bool) (*AppContext, error) {
 		return nil, err
 	}
 
+	// Migrate schema if needed (FR-10), then check version.
+	if err := db.MigrateIfNeeded(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	if checkVersion {
 		if err := db.CheckVersion(store.SchemaVersion); err != nil {
 			db.Close()
@@ -84,6 +91,12 @@ func newAppContext(basePath string, checkVersion bool) (*AppContext, error) {
 		return nil, err
 	}
 
+	// Create embedding generator with chunking config.
+	chunkCfg := cfg.Embedding.Chunking
+	maxBytes := chunkCfg.MaxTokens * chunkCfg.BytesPerToken
+	overlapBytes := chunkCfg.OverlapTokens * chunkCfg.BytesPerToken
+	embGen := embedding.NewGenerator(embedder, embRepo, cfg.Embedding.DocumentPrefix, maxBytes, overlapBytes)
+
 	fm := frontmatter.NewFileService()
 
 	locker, err := filelock.NewFlockLocker(b.LockPath())
@@ -104,7 +117,7 @@ func newAppContext(basePath string, checkVersion bool) (*AppContext, error) {
 	return &AppContext{
 		Config: cfg, Brain: b, DB: db,
 		FileRepo: fileRepo, EmbRepo: embRepo,
-		Ledger: led, Embedder: embedder,
+		Ledger: led, Embedder: embedder, EmbGen: embGen,
 		FM: fm, Locker: locker, DocGen: docGen,
 	}, nil
 }

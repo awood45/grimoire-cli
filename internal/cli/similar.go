@@ -69,7 +69,7 @@ func runSimilar(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Search for similar files.
-	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder)
+	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder, appCtx.Config.Embedding.QueryPrefix)
 	results, searchErr := engine.Similar(context.Background(), input)
 	if searchErr != nil {
 		WriteError(out, searchErr)

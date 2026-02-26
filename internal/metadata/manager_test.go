@@ -6,10 +6,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/awood45/grimoire-cli/internal/brain"
+	"github.com/awood45/grimoire-cli/internal/embedding"
 	embedtesting "github.com/awood45/grimoire-cli/internal/embedding/testing"
 	flocktesting "github.com/awood45/grimoire-cli/internal/filelock/testing"
 	fmtesting "github.com/awood45/grimoire-cli/internal/frontmatter/testing"
@@ -31,6 +33,7 @@ type testHarness struct {
 	ledger   *ledgertesting.FakeLedger
 	fm       *fmtesting.FakeFrontmatterService
 	embedder *embedtesting.FakeProvider
+	embGen   *embedding.Generator
 	locker   *flocktesting.FakeLocker
 	tmpDir   string
 }
@@ -52,7 +55,8 @@ func newTestHarness(t *testing.T) *testHarness {
 	emb := embedtesting.NewFakeProvider()
 	lock := flocktesting.NewFakeLocker()
 
-	mgr := NewManager(b, fr, er, l, fm, emb, lock)
+	gen := embedding.NewGenerator(emb, er, "search_document: ", 4096, 512)
+	mgr := NewManager(b, fr, er, l, fm, gen, lock)
 
 	return &testHarness{
 		mgr:      mgr,
@@ -62,6 +66,7 @@ func newTestHarness(t *testing.T) *testHarness {
 		ledger:   l,
 		fm:       fm,
 		embedder: emb,
+		embGen:   gen,
 		locker:   lock,
 		tmpDir:   tmpDir,
 	}
@@ -183,7 +188,8 @@ func TestCreate_setsTimestamps(t *testing.T) {
 	assert.Equal(t, meta.CreatedAt, meta.UpdatedAt, "created_at should equal updated_at")
 }
 
-// TestCreate_embeddingFailure tests FR-3.2.1: embedding failure does not block metadata creation.
+// TestCreate_embeddingFailure tests FR-11: embedding failure surfaces as ErrCodeEmbeddingWarning
+// but metadata is still created (returned in the result).
 func TestCreate_embeddingFailure(t *testing.T) {
 	h := newTestHarness(t)
 	h.createTestFile(t, "embed-fail.md", "# Embedding Failure")
@@ -199,9 +205,11 @@ func TestCreate_embeddingFailure(t *testing.T) {
 	}
 
 	meta, err := h.mgr.Create(ctx, opts)
-	require.NoError(t, err)
+	// Embedding error is now surfaced as a warning (FR-11).
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingWarning))
 
-	// Metadata should still be created.
+	// Metadata should still be returned (created successfully before embedding).
 	assert.Equal(t, "embed-fail.md", meta.Filepath)
 
 	// Verify metadata was written to all stores.
@@ -411,6 +419,33 @@ func TestUpdate_noChanges(t *testing.T) {
 	_, err := h.mgr.Update(ctx, opts)
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+// TestUpdate_onlySummaryEmbeddingText tests that setting only SummaryEmbeddingText
+// is recognized as a change (W-1 review fix).
+func TestUpdate_onlySummaryEmbeddingText(t *testing.T) {
+	h := newTestHarness(t)
+	h.createTestFile(t, "notes/test.md", "# Test\n\nContent")
+
+	ctx := context.Background()
+	// First create the metadata.
+	_, err := h.mgr.Create(ctx, CreateOptions{
+		Filepath:    "notes/test.md",
+		SourceAgent: "test-agent",
+		Tags:        []string{"go"},
+		Summary:     "A test file",
+	})
+	require.NoError(t, err)
+
+	// Now update with only SummaryEmbeddingText — should NOT be rejected.
+	summaryText := "AI-generated summary of the file"
+	opts := UpdateOptions{
+		Filepath:             "notes/test.md",
+		SummaryEmbeddingText: &summaryText,
+	}
+
+	_, err = h.mgr.Update(ctx, opts)
+	require.NoError(t, err, "Update with only SummaryEmbeddingText should be accepted as a change")
 }
 
 // TestUpdate_rebuildInProgress tests FR-3.2.2: lock contention.
@@ -769,7 +804,8 @@ func TestNewManager_constructor(t *testing.T) {
 	emb := embedtesting.NewFakeProvider()
 	lock := flocktesting.NewFakeLocker()
 
-	mgr := NewManager(b, fr, er, l, fm, emb, lock)
+	gen := embedding.NewGenerator(emb, er, "search_document: ", 4096, 512)
+	mgr := NewManager(b, fr, er, l, fm, gen, lock)
 	assert.NotNil(t, mgr)
 }
 
@@ -789,7 +825,7 @@ func TestCreate_lockError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestUpdate_embeddingFailure tests that embedding failure during update does not block.
+// TestUpdate_embeddingFailure tests FR-11: embedding failure during update surfaces as warning.
 func TestUpdate_embeddingFailure(t *testing.T) {
 	h := newTestHarness(t)
 	absPath := h.createTestFile(t, "update-emb-fail.md", "# Update Embed Fail")
@@ -813,10 +849,12 @@ func TestUpdate_embeddingFailure(t *testing.T) {
 	}
 
 	meta, err := h.mgr.Update(ctx, opts)
-	require.NoError(t, err)
+	// Embedding error is now surfaced as a warning (FR-11).
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingWarning))
 	assert.Equal(t, []string{"new"}, meta.Tags)
 
-	// Metadata should still be updated.
+	// Metadata should still be updated (returned in the result).
 	assert.Len(t, h.fileRepo.UpdateCalls, 1)
 }
 
@@ -1177,7 +1215,7 @@ func TestArchive_fileRepoDeleteError(t *testing.T) {
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeDatabaseError))
 }
 
-// TestCreate_embeddingUpsertError tests Create when embedding upsert fails (fail open).
+// TestCreate_embeddingUpsertError tests Create when embedding upsert fails (FR-11: surfaced as warning).
 func TestCreate_embeddingUpsertError(t *testing.T) {
 	h := newTestHarness(t)
 	h.createTestFile(t, "upsert-err.md", "# Upsert Error")
@@ -1192,10 +1230,12 @@ func TestCreate_embeddingUpsertError(t *testing.T) {
 	}
 
 	meta, err := h.mgr.Create(ctx, opts)
-	require.NoError(t, err)
+	// Upsert error now surfaces as EmbeddingWarning (FR-11).
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingWarning))
 	assert.Equal(t, "upsert-err.md", meta.Filepath)
 
-	// Embedding generation was attempted but upsert failed silently.
+	// Embedding generation was attempted.
 	assert.Len(t, h.embedder.GenerateCalls, 1)
 }
 
@@ -1277,7 +1317,8 @@ func TestArchive_resolveArchivePathError(t *testing.T) {
 	emb := embedtesting.NewFakeProvider()
 	lock := flocktesting.NewFakeLocker()
 
-	mgr := NewManager(b, fr, er, l, fm, emb, lock)
+	gen := embedding.NewGenerator(emb, er, "search_document: ", 4096, 512)
+	mgr := NewManager(b, fr, er, l, fm, gen, lock)
 
 	// Create file in files/ dir.
 	absPath := filepath.Join(b.FilesDir(), "test.md")
@@ -1334,4 +1375,122 @@ func TestArchive_embeddingDeleteNotFound(t *testing.T) {
 	result, err := h.mgr.Archive(ctx, "arch-no-emb.md")
 	require.NoError(t, err)
 	assert.Equal(t, "arch-no-emb.md", result.OriginalPath)
+}
+
+// --- New Chunked Embedding Tests ---
+
+// TestCreate_EmbeddingWarning tests FR-11: when the Generator returns an error,
+// Create returns ErrCodeEmbeddingWarning (not nil). The metadata is still returned.
+func TestCreate_EmbeddingWarning(t *testing.T) {
+	h := newTestHarness(t)
+	h.createTestFile(t, "warn.md", "# Warning Test")
+
+	// Inject embedding generation error.
+	h.embedder.GenerateErr = errors.New("embedding service unavailable")
+
+	ctx := context.Background()
+	opts := CreateOptions{
+		Filepath:    "warn.md",
+		SourceAgent: "test-agent",
+		Tags:        []string{"go"},
+		Summary:     "A warning test",
+	}
+
+	meta, err := h.mgr.Create(ctx, opts)
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingWarning),
+		"expected ErrCodeEmbeddingWarning, got: %v", err)
+
+	// Metadata should still be fully populated and returned.
+	assert.Equal(t, "warn.md", meta.Filepath)
+	assert.Equal(t, "test-agent", meta.SourceAgent)
+	assert.Equal(t, []string{"go"}, meta.Tags)
+	assert.Equal(t, "A warning test", meta.Summary)
+	assert.False(t, meta.CreatedAt.IsZero())
+
+	// All stores should have been written (metadata was created before embedding).
+	assert.Len(t, h.fileRepo.InsertCalls, 1)
+	assert.Len(t, h.fm.WriteCalls, 1)
+	require.Len(t, h.ledger.Entries, 1)
+	assert.Equal(t, "create", h.ledger.Entries[0].Operation)
+}
+
+// TestCreate_WithSummaryEmbeddingText tests FR-7: SummaryEmbeddingText is forwarded
+// to the Generator via GenerateForFileWithSummary. For a large file (multi-chunk),
+// a summary embedding should be stored at chunk_index=-1.
+func TestCreate_WithSummaryEmbeddingText(t *testing.T) {
+	h := newTestHarness(t)
+
+	// Create a large file that will produce multiple chunks with the default 4096-byte max.
+	// Use a small-chunk generator to force multiple chunks.
+	smallChunkGen := embedding.NewGenerator(h.embedder, h.embRepo, "search_document: ", 50, 10)
+	h.mgr = NewManager(h.brain, h.fileRepo, h.embRepo, h.ledger, h.fm, smallChunkGen, h.locker)
+
+	// Create content that exceeds 50 bytes to force multiple chunks.
+	content := strings.Repeat("Line of text here.\n", 10) // 190 bytes
+	h.createTestFile(t, "summary-test.md", content)
+
+	ctx := context.Background()
+	opts := CreateOptions{
+		Filepath:             "summary-test.md",
+		SourceAgent:          "test-agent",
+		Tags:                 []string{"go"},
+		Summary:              "A test file",
+		SummaryEmbeddingText: "This is the summary embedding text for the document.",
+	}
+
+	meta, err := h.mgr.Create(ctx, opts)
+	require.NoError(t, err)
+	assert.Equal(t, "summary-test.md", meta.Filepath)
+
+	// Verify that multiple chunks were stored (including summary).
+	chunks := h.embRepo.Data["summary-test.md"]
+	require.Greater(t, len(chunks), 1, "expected multiple chunks for large file")
+
+	// Verify that the summary text was embedded with the document prefix.
+	assert.Contains(t, h.embedder.GenerateCalls, "search_document: This is the summary embedding text for the document.")
+
+	// Verify a summary chunk exists at index -1.
+	var summaryFound bool
+	for _, chunk := range chunks {
+		if chunk.ChunkIndex == -1 {
+			summaryFound = true
+			assert.True(t, chunk.IsSummary, "summary chunk should have IsSummary=true")
+		}
+	}
+	assert.True(t, summaryFound, "expected summary embedding at chunk_index=-1")
+}
+
+// TestUpdate_ReEmbedsOnUpdate tests that Update calls GenerateForFile to
+// regenerate embeddings after updating metadata.
+func TestUpdate_ReEmbedsOnUpdate(t *testing.T) {
+	h := newTestHarness(t)
+	absPath := h.createTestFile(t, "reembed.md", "# Re-embed Test Content")
+
+	existing := store.FileMetadata{
+		Filepath:    "reembed.md",
+		SourceAgent: "agent",
+		Tags:        []string{"old"},
+		CreatedAt:   time.Now().UTC().Add(-time.Hour),
+		UpdatedAt:   time.Now().UTC().Add(-time.Hour),
+	}
+	h.fileRepo.Data["reembed.md"] = existing
+	h.fm.Data[absPath] = existing
+
+	ctx := context.Background()
+	opts := UpdateOptions{
+		Filepath: "reembed.md",
+		Tags:     []string{"new"},
+	}
+
+	meta, err := h.mgr.Update(ctx, opts)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new"}, meta.Tags)
+
+	// Verify that the Generator was called (embedding was generated).
+	assert.NotEmpty(t, h.embedder.GenerateCalls, "expected GenerateForFile to be called during update")
+
+	// Verify that an embedding was stored for the file.
+	assert.NotEmpty(t, h.embRepo.UpsertCalls, "expected embedding to be upserted during update")
+	assert.Contains(t, h.embRepo.UpsertCalls, "reembed.md")
 }

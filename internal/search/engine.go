@@ -11,9 +11,10 @@ import (
 
 // Engine handles metadata queries and similarity search.
 type Engine struct {
-	fileRepo store.FileRepository
-	embRepo  store.EmbeddingRepository
-	embedder embedding.Provider
+	fileRepo    store.FileRepository
+	embRepo     store.EmbeddingRepository
+	embedder    embedding.Provider
+	queryPrefix string
 }
 
 // NewEngine creates a new search Engine with the given dependencies.
@@ -21,11 +22,13 @@ func NewEngine(
 	fileRepo store.FileRepository,
 	embRepo store.EmbeddingRepository,
 	embedder embedding.Provider,
+	queryPrefix string,
 ) *Engine {
 	return &Engine{
-		fileRepo: fileRepo,
-		embRepo:  embRepo,
-		embedder: embedder,
+		fileRepo:    fileRepo,
+		embRepo:     embRepo,
+		embedder:    embedder,
+		queryPrefix: queryPrefix,
 	}
 }
 
@@ -86,9 +89,9 @@ func (e *Engine) resolveQueryVector(ctx context.Context, input *SimilarInput) ([
 	return emb.Vector, nil
 }
 
-// resolveFromText generates an embedding for the given text.
+// resolveFromText generates an embedding for the given text, prepending the query prefix (FR-5).
 func (e *Engine) resolveFromText(ctx context.Context, text string) ([]float32, error) {
-	vec, err := e.embedder.GenerateEmbedding(ctx, text)
+	vec, err := e.embedder.GenerateEmbedding(ctx, e.queryPrefix+text)
 	if err != nil {
 		return nil, err
 	}
@@ -104,18 +107,24 @@ func (e *Engine) resolveFromText(ctx context.Context, text string) ([]float32, e
 }
 
 // computeScores calculates cosine similarity for all embeddings, excluding the query file if present.
+// When multiple chunks exist for a file, only the best (highest) score is kept (FR-6).
 func (e *Engine) computeScores(queryVector []float32, allEmbeddings []store.Embedding, excludePath string) []scoredEntry {
-	scored := make([]scoredEntry, 0, len(allEmbeddings))
+	bestScores := make(map[string]float64)
+	seen := make(map[string]bool)
 	for i := range allEmbeddings {
 		emb := &allEmbeddings[i]
 		if emb.Filepath == excludePath {
 			continue
 		}
 		score := CosineSimilarity(queryVector, emb.Vector)
-		scored = append(scored, scoredEntry{
-			filepath: emb.Filepath,
-			score:    score,
-		})
+		if !seen[emb.Filepath] || score > bestScores[emb.Filepath] {
+			bestScores[emb.Filepath] = score
+			seen[emb.Filepath] = true
+		}
+	}
+	scored := make([]scoredEntry, 0, len(bestScores))
+	for fp, score := range bestScores {
+		scored = append(scored, scoredEntry{filepath: fp, score: score})
 	}
 	return scored
 }

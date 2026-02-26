@@ -16,9 +16,6 @@ import (
 	"github.com/awood45/grimoire-cli/internal/store"
 )
 
-// noopModelID is the model ID returned by the noop embedding provider.
-const noopModelID = "none"
-
 // Manager orchestrates metadata mutations across frontmatter, ledger, and
 // SQLite stores with locking and optional embedding generation.
 type Manager struct {
@@ -27,7 +24,7 @@ type Manager struct {
 	embRepo  store.EmbeddingRepository
 	ledger   ledger.Ledger
 	fm       frontmatter.Service
-	embedder embedding.Provider
+	embGen   *embedding.Generator
 	locker   filelock.Locker
 }
 
@@ -38,7 +35,7 @@ func NewManager(
 	embRepo store.EmbeddingRepository,
 	led ledger.Ledger,
 	fm frontmatter.Service,
-	embedder embedding.Provider,
+	embGen *embedding.Generator,
 	locker filelock.Locker,
 ) *Manager {
 	return &Manager{
@@ -47,14 +44,15 @@ func NewManager(
 		embRepo:  embRepo,
 		ledger:   led,
 		fm:       fm,
-		embedder: embedder,
+		embGen:   embGen,
 		locker:   locker,
 	}
 }
 
 // Create creates metadata for a file following the sequence:
 // TryLockShared -> stat file -> check no existing metadata -> generate timestamps ->
-// Write frontmatter -> Append ledger -> Insert DB -> Generate embedding (fail open) -> UnlockShared.
+// Write frontmatter -> Append ledger -> Insert DB -> Generate embedding -> UnlockShared.
+// Embedding errors are returned as ErrCodeEmbeddingWarning (metadata is still created).
 func (m *Manager) Create(ctx context.Context, opts CreateOptions) (store.FileMetadata, error) { //nolint:gocritic // hugeParam: interface-compatible value type.
 	if err := m.acquireSharedLock(); err != nil {
 		return store.FileMetadata{}, err
@@ -106,8 +104,16 @@ func (m *Manager) Create(ctx context.Context, opts CreateOptions) (store.FileMet
 		return store.FileMetadata{}, err
 	}
 
-	// Generate embedding (fail open).
-	m.generateEmbedding(ctx, opts.Filepath, absPath)
+	// Generate embedding (FR-11: surface errors as warnings).
+	var embErr error
+	if opts.SummaryEmbeddingText != "" {
+		embErr = m.embGen.GenerateForFileWithSummary(ctx, opts.Filepath, absPath, opts.SummaryEmbeddingText)
+	} else {
+		embErr = m.embGen.GenerateForFile(ctx, opts.Filepath, absPath)
+	}
+	if embErr != nil {
+		return meta, sberrors.Wrap(embErr, sberrors.ErrCodeEmbeddingWarning, "embedding generation failed")
+	}
 
 	return meta, nil
 }
@@ -160,8 +166,16 @@ func (m *Manager) Update(ctx context.Context, opts UpdateOptions) (store.FileMet
 		return store.FileMetadata{}, err
 	}
 
-	// Regenerate embedding (fail open).
-	m.generateEmbedding(ctx, opts.Filepath, absPath)
+	// Regenerate embedding (FR-11: surface errors as warnings).
+	var embErr error
+	if opts.SummaryEmbeddingText != nil && *opts.SummaryEmbeddingText != "" {
+		embErr = m.embGen.GenerateForFileWithSummary(ctx, opts.Filepath, absPath, *opts.SummaryEmbeddingText)
+	} else {
+		embErr = m.embGen.GenerateForFile(ctx, opts.Filepath, absPath)
+	}
+	if embErr != nil {
+		return merged, sberrors.Wrap(embErr, sberrors.ErrCodeEmbeddingWarning, "embedding generation failed")
+	}
 
 	return merged, nil
 }
@@ -262,7 +276,7 @@ func (m *Manager) Archive(ctx context.Context, fp string) (ArchiveResult, error)
 	}
 
 	// Delete embedding.
-	if err := m.embRepo.Delete(ctx, fp); err != nil {
+	if err := m.embRepo.DeleteForFile(ctx, fp); err != nil {
 		// Embedding deletion failure is non-fatal; embedding might not exist.
 		if !sberrors.HasCode(err, sberrors.ErrCodeMetadataNotFound) {
 			return ArchiveResult{}, err
@@ -311,6 +325,9 @@ func hasChanges(opts *UpdateOptions) bool {
 	if opts.Summary != nil {
 		return true
 	}
+	if opts.SummaryEmbeddingText != nil {
+		return true
+	}
 	return false
 }
 
@@ -329,27 +346,6 @@ func mergeUpdate(existing *store.FileMetadata, opts *UpdateOptions) store.FileMe
 	}
 
 	return merged
-}
-
-// generateEmbedding generates and stores a vector embedding for the file.
-// Failures are swallowed (fail open) since embedding is optional.
-func (m *Manager) generateEmbedding(ctx context.Context, fp, absPath string) {
-	// Skip if no embedding provider is configured.
-	if m.embedder.ModelID() == noopModelID {
-		return
-	}
-
-	content, err := os.ReadFile(absPath)
-	if err != nil {
-		return
-	}
-
-	vector, err := m.embedder.GenerateEmbedding(ctx, string(content))
-	if err != nil {
-		return
-	}
-
-	_ = m.embRepo.Upsert(ctx, fp, vector, m.embedder.ModelID()) //nolint:errcheck // Embedding upsert is fail-open.
 }
 
 // appendLedgerEntry appends a create or update entry to the ledger.

@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +98,10 @@ func setupTestStack(t *testing.T, embProvider embedding.Provider) testStack {
 		embProvider = &embedding.NoopProvider{}
 	}
 
-	mgr := metadata.NewManager(b, fileRepo, embRepo, led, fm, embProvider, locker)
+	// Create an embedding.Generator wrapping the provider and embedding repo.
+	embGen := embedding.NewGenerator(embProvider, embRepo, "search_document: ", 4096, 512)
+
+	mgr := metadata.NewManager(b, fileRepo, embRepo, led, fm, embGen, locker)
 
 	t.Cleanup(func() {
 		locker.Close()
@@ -588,6 +593,140 @@ func TestInit_withForce(t *testing.T) {
 	}
 }
 
+// TestCreateEmbedding_LargeFile_OllamaContextLimit replicates a bug where
+// large files silently fail to generate embeddings. Ollama returns HTTP 500
+// with "the input length exceeds the context length" for prompts that exceed
+// the model's token limit. The manager's generateEmbedding method silently
+// swallows the error, so Create succeeds but no embedding is stored.
+//
+// This test uses a mock Ollama server that mimics the real behavior: succeed
+// for small inputs, return 500 for inputs exceeding a token threshold. It
+// asserts that both small and large files should have embeddings after Create.
+func TestCreateEmbedding_LargeFile_OllamaContextLimit(t *testing.T) {
+	ctx := context.Background()
+
+	// Token limit threshold (in bytes). The real nomic-embed-text model has
+	// a 2048-token context window; Ollama returns 500 when exceeded.
+	// We set this above the Generator's maxChunkBytes (4096) + prefix overhead (~18)
+	// but below the total file size, so individual chunks succeed but the
+	// original unchunked file would have failed.
+	const contextLimitBytes = 5000
+
+	// Mock Ollama server (/api/embed): returns a valid embedding for small inputs,
+	// 500 error for inputs that exceed the context limit.
+	type ollamaReq struct {
+		Model string `json:"model"`
+		Input string `json:"input"`
+	}
+	type ollamaResp struct {
+		Embeddings [][]float32 `json:"embeddings"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Input) > contextLimitBytes {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck // test helper; encoding error irrelevant
+				"error": "the input length exceeds the context length",
+			})
+			return
+		}
+
+		// Return a deterministic 768-dimension embedding.
+		vec := make([]float32, 768)
+		for i := range vec {
+			vec[i] = 0.01 * float32(i)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ollamaResp{Embeddings: [][]float32{vec}}) //nolint:errcheck // test helper; encoding error irrelevant
+	}))
+	defer server.Close()
+
+	// Create OllamaProvider pointing at mock server.
+	ollamaEmb := embedding.NewOllamaProvider(server.URL, "nomic-embed-text")
+
+	// Set up a full test stack with the real OllamaProvider.
+	ts := setupTestStack(t, ollamaEmb)
+
+	// --- Small file: under the context limit ---
+	smallContent := "# Quick Research\n\nA short note about Microsoft Graph API.\n"
+	smallPath := "research-quick/small-note.md"
+	createTestFile(t, ts.b, smallPath, smallContent)
+
+	_, err := ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:    smallPath,
+		SourceAgent: "quick-researcher",
+		Tags:        []string{"type/quick-research"},
+		Summary:     "Small research note",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for small file: %v", err)
+	}
+
+	// Verify the small file has an embedding.
+	embRepo := store.NewSQLiteEmbeddingRepository(ts.db)
+	smallEmb, err := embRepo.Get(ctx, smallPath)
+	if err != nil {
+		t.Fatalf("Small file should have an embedding: %v", err)
+	}
+	if len(smallEmb.Vector) != 768 {
+		t.Errorf("Small file vector length = %d, want 768", len(smallEmb.Vector))
+	}
+
+	// --- Large file: exceeds the context limit ---
+	// Generate a realistic large document (~10KB, well over the 4KB threshold).
+	var largeBuilder strings.Builder
+	largeBuilder.WriteString("# Deep Research: Agent Teams Workflow Implementation Guide\n\n")
+	for i := 0; i < 200; i++ {
+		largeBuilder.WriteString("## Section " + string(rune('A'+i%26)) + "\n\n")
+		largeBuilder.WriteString("This section covers the implementation details for configuring agent teams ")
+		largeBuilder.WriteString("in a production workflow. The key considerations include task decomposition, ")
+		largeBuilder.WriteString("parallel execution strategies, and error handling patterns.\n\n")
+	}
+	largeContent := largeBuilder.String()
+	if len(largeContent) <= contextLimitBytes {
+		t.Fatalf("Test setup: large content (%d bytes) should exceed context limit (%d bytes)", len(largeContent), contextLimitBytes)
+	}
+
+	largePath := "research-deep/deep-research/large-guide.md"
+	createTestFile(t, ts.b, largePath, largeContent)
+
+	_, err = ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:    largePath,
+		SourceAgent: "researcher",
+		Tags:        []string{"type/deep-research"},
+		Summary:     "Large research guide",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for large file: %v", err)
+	}
+
+	// After chunking, the large file should have multiple embeddings (one per chunk).
+	// The Generator splits the content into chunks that each fit within the context limit,
+	// so the mock server should accept all of them.
+	largeEmb, err := embRepo.Get(ctx, largePath)
+	if err != nil {
+		t.Fatalf("Large file should have an embedding, but got error: %v", err)
+	}
+	if len(largeEmb.Vector) == 0 {
+		t.Error("Large file embedding vector should not be empty")
+	}
+
+	// Verify multiple chunks were stored (the file is ~30KB, context limit is 4KB).
+	allChunks, err := embRepo.GetForFile(ctx, largePath)
+	if err != nil {
+		t.Fatalf("GetForFile() error: %v", err)
+	}
+	if len(allChunks) < 2 {
+		t.Errorf("Expected multiple chunks for large file, got %d", len(allChunks))
+	}
+}
+
 // TestInit_claudeCodeIntegration exercises FR-3.1.2.
 func TestInit_claudeCodeIntegration(t *testing.T) {
 	ctx := context.Background()
@@ -621,4 +760,335 @@ func TestInit_claudeCodeIntegration(t *testing.T) {
 
 	// Assert skill file references brain base path.
 	assertFileContains(t, skillPath, []string{dir}, nil)
+}
+
+// TestCreateEmbedding_ChunkedFile exercises FR-1, FR-2, FR-3, FR-4: embedding
+// a large file produces multiple chunks with correct metadata.
+func TestCreateEmbedding_ChunkedFile(t *testing.T) {
+	ctx := context.Background()
+
+	// Mock Ollama server at /api/embed that returns deterministic embeddings.
+	type ollamaReq struct {
+		Model string `json:"model"`
+		Input string `json:"input"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		// Return a deterministic 3-dimension embedding based on input length.
+		vec := []float32{float32(len(req.Input)%100) / 100.0, 0.5, 0.3}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][][]float32{"embeddings": {vec}}) //nolint:errcheck // test
+	}))
+	defer server.Close()
+
+	ollamaEmb := embedding.NewOllamaProvider(server.URL, "nomic-embed-text")
+	ts := setupTestStack(t, ollamaEmb)
+
+	// Create a large file (>8KB) with paragraph breaks to produce multiple chunks.
+	var builder strings.Builder
+	builder.WriteString("# Chunked Document\n\n")
+	for i := 0; i < 100; i++ {
+		builder.WriteString("## Section " + string(rune('A'+i%26)) + "\n\n")
+		builder.WriteString("This is a detailed paragraph in section that provides information. ")
+		builder.WriteString("It has enough text to contribute to the overall file size. ")
+		builder.WriteString("Multiple paragraphs ensure natural chunk boundaries exist.\n\n")
+	}
+	content := builder.String()
+	relPath := "docs/large-doc.md"
+	createTestFile(t, ts.b, relPath, content)
+
+	_, err := ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:    relPath,
+		SourceAgent: "chunk-agent",
+		Tags:        []string{"chunked"},
+		Summary:     "A large document for chunk testing",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error: %v", err)
+	}
+
+	// Verify multiple chunks are stored.
+	embRepo := store.NewSQLiteEmbeddingRepository(ts.db)
+	chunks, err := embRepo.GetForFile(ctx, relPath)
+	if err != nil {
+		t.Fatalf("GetForFile() error: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("Expected multiple chunks, got %d", len(chunks))
+	}
+
+	// Verify each chunk has correct ChunkIndex (0, 1, 2, ...) and that
+	// ChunkStart/ChunkEnd are populated.
+	for i, chunk := range chunks {
+		if chunk.ChunkIndex != i {
+			t.Errorf("Chunk[%d].ChunkIndex = %d, want %d", i, chunk.ChunkIndex, i)
+		}
+		if chunk.ChunkEnd <= chunk.ChunkStart {
+			t.Errorf("Chunk[%d] has invalid offsets: start=%d, end=%d", i, chunk.ChunkStart, chunk.ChunkEnd)
+		}
+		if len(chunk.Vector) == 0 {
+			t.Errorf("Chunk[%d] has empty vector", i)
+		}
+		if chunk.ModelID != "nomic-embed-text" {
+			t.Errorf("Chunk[%d].ModelID = %q, want %q", i, chunk.ModelID, "nomic-embed-text")
+		}
+	}
+
+	// Verify the first chunk starts at 0 and the last chunk ends at the actual
+	// file length (which includes frontmatter prepended by Manager.Create).
+	if chunks[0].ChunkStart != 0 {
+		t.Errorf("First chunk should start at 0, got %d", chunks[0].ChunkStart)
+	}
+	absPath := filepath.Join(ts.b.FilesDir(), relPath)
+	fileData, readErr := os.ReadFile(absPath)
+	if readErr != nil {
+		t.Fatalf("failed to read file: %v", readErr)
+	}
+	actualLen := len(fileData) // includes frontmatter
+	lastChunk := chunks[len(chunks)-1]
+	if lastChunk.ChunkEnd > actualLen {
+		t.Errorf("Last chunk end (%d) exceeds actual file length (%d)", lastChunk.ChunkEnd, actualLen)
+	}
+}
+
+// TestCreateWithSummaryEmbedding exercises FR-7, FR-8: summary embeddings
+// are only stored for multi-chunk files.
+func TestCreateWithSummaryEmbedding(t *testing.T) {
+	ctx := context.Background()
+
+	// Mock Ollama server at /api/embed.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		vec := []float32{0.1, 0.2, 0.3}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][][]float32{"embeddings": {vec}}) //nolint:errcheck // test
+	}))
+	defer server.Close()
+
+	ollamaEmb := embedding.NewOllamaProvider(server.URL, "nomic-embed-text")
+	ts := setupTestStack(t, ollamaEmb)
+	embRepo := store.NewSQLiteEmbeddingRepository(ts.db)
+
+	// --- Large file (multi-chunk) with SummaryEmbeddingText ---
+	var builder strings.Builder
+	builder.WriteString("# Large Summary Document\n\n")
+	for i := 0; i < 100; i++ {
+		builder.WriteString("## Topic " + string(rune('A'+i%26)) + "\n\n")
+		builder.WriteString("Detailed discussion on this topic with enough text to push file size. ")
+		builder.WriteString("Additional context ensures the file exceeds the chunk size limit.\n\n")
+	}
+	largeContent := builder.String()
+	largePath := "docs/large-summary.md"
+	createTestFile(t, ts.b, largePath, largeContent)
+
+	_, err := ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:             largePath,
+		SourceAgent:          "summary-agent",
+		Tags:                 []string{"summary"},
+		Summary:              "A large document with summary",
+		SummaryEmbeddingText: "This document discusses multiple topics in detail",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for large file: %v", err)
+	}
+
+	// Verify a summary chunk exists at ChunkIndex=-1 with IsSummary=true.
+	allChunks, err := embRepo.GetForFile(ctx, largePath)
+	if err != nil {
+		t.Fatalf("GetForFile() error: %v", err)
+	}
+
+	var foundSummary bool
+	for _, chunk := range allChunks {
+		if chunk.ChunkIndex == -1 && chunk.IsSummary {
+			foundSummary = true
+			break
+		}
+	}
+	if !foundSummary {
+		t.Error("Expected summary chunk (ChunkIndex=-1, IsSummary=true) for multi-chunk file, not found")
+	}
+
+	// --- Small file (single-chunk) with SummaryEmbeddingText ---
+	smallPath := "docs/small-summary.md"
+	createTestFile(t, ts.b, smallPath, "# Small Note\n\nJust a short note.\n")
+
+	_, err = ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:             smallPath,
+		SourceAgent:          "summary-agent",
+		Tags:                 []string{"summary"},
+		Summary:              "A small note",
+		SummaryEmbeddingText: "A brief note about something",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for small file: %v", err)
+	}
+
+	// Verify NO summary chunk for single-chunk files (FR-8).
+	smallChunks, err := embRepo.GetForFile(ctx, smallPath)
+	if err != nil {
+		t.Fatalf("GetForFile() error: %v", err)
+	}
+
+	for _, chunk := range smallChunks {
+		if chunk.ChunkIndex == -1 || chunk.IsSummary {
+			t.Error("Single-chunk file should NOT have a summary chunk, but found one")
+		}
+	}
+	if len(smallChunks) != 1 {
+		t.Errorf("Small file should have exactly 1 chunk, got %d", len(smallChunks))
+	}
+}
+
+// TestSchemaV1ToV2Migration exercises FR-10: automatic v1 to v2 schema migration.
+func TestSchemaV1ToV2Migration(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	// Create and populate a v1 database.
+	seedV1Database(t, dbPath)
+
+	// Reopen and run migration.
+	db2, err := store.NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to reopen database: %v", err)
+	}
+	defer db2.Close()
+
+	if err := db2.MigrateIfNeeded(); err != nil {
+		t.Fatalf("MigrateIfNeeded() error: %v", err)
+	}
+
+	embRepo := store.NewSQLiteEmbeddingRepository(db2)
+	ctx := context.Background()
+
+	t.Run("schema_version_is_v2", func(t *testing.T) {
+		if err := db2.CheckVersion(store.SchemaVersion); err != nil {
+			t.Fatalf("Schema version mismatch after migration: %v", err)
+		}
+	})
+
+	t.Run("migrated_embedding_defaults", func(t *testing.T) {
+		alphaEmb, err := embRepo.Get(ctx, "notes/alpha.md")
+		if err != nil {
+			t.Fatalf("Get alpha embedding after migration: %v", err)
+		}
+		if alphaEmb.ChunkIndex != 0 {
+			t.Errorf("Migrated embedding ChunkIndex = %d, want 0", alphaEmb.ChunkIndex)
+		}
+		if alphaEmb.ChunkStart != 0 || alphaEmb.ChunkEnd != 0 {
+			t.Errorf("Migrated embedding should have default chunk offsets (0, 0), got (%d, %d)", alphaEmb.ChunkStart, alphaEmb.ChunkEnd)
+		}
+		if alphaEmb.IsSummary {
+			t.Error("Migrated embedding should not be a summary")
+		}
+		if len(alphaEmb.Vector) != 3 {
+			t.Errorf("Vector length = %d, want 3", len(alphaEmb.Vector))
+		}
+	})
+
+	t.Run("migrated_embedding_preserves_model", func(t *testing.T) {
+		betaEmb, err := embRepo.Get(ctx, "notes/beta.md")
+		if err != nil {
+			t.Fatalf("Get beta embedding after migration: %v", err)
+		}
+		if betaEmb.ModelID != "nomic-embed-text" {
+			t.Errorf("Migrated embedding ModelID = %q, want %q", betaEmb.ModelID, "nomic-embed-text")
+		}
+	})
+
+	t.Run("v2_composite_pk_allows_multiple_chunks", func(t *testing.T) {
+		err := embRepo.Upsert(ctx, store.Embedding{
+			Filepath:   "notes/alpha.md",
+			ChunkIndex: 1,
+			Vector:     []float32{0.7, 0.8, 0.9},
+			ModelID:    "nomic-embed-text",
+			ChunkStart: 100,
+			ChunkEnd:   200,
+		})
+		if err != nil {
+			t.Fatalf("Failed to insert chunk 1 after migration: %v", err)
+		}
+
+		allChunks, err := embRepo.GetForFile(ctx, "notes/alpha.md")
+		if err != nil {
+			t.Fatalf("GetForFile after migration: %v", err)
+		}
+		if len(allChunks) != 2 {
+			t.Errorf("Expected 2 chunks after inserting chunk 1, got %d", len(allChunks))
+		}
+	})
+}
+
+// seedV1Database creates a v1-schema database with test data for migration tests.
+func seedV1Database(t *testing.T, dbPath string) {
+	t.Helper()
+
+	db, err := store.NewDB(dbPath)
+	if err != nil {
+		t.Fatalf("failed to open database: %v", err)
+	}
+	defer db.Close()
+
+	v1Statements := []string{
+		`CREATE TABLE IF NOT EXISTS files (
+			filepath TEXT PRIMARY KEY,
+			source_agent TEXT NOT NULL,
+			summary TEXT NOT NULL DEFAULT '',
+			created_at DATETIME NOT NULL,
+			updated_at DATETIME NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS file_tags (
+			filepath TEXT NOT NULL REFERENCES files(filepath) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			PRIMARY KEY (filepath, tag)
+		)`,
+		`CREATE TABLE IF NOT EXISTS embeddings (
+			filepath TEXT PRIMARY KEY REFERENCES files(filepath) ON DELETE CASCADE,
+			vector BLOB NOT NULL,
+			model_id TEXT NOT NULL,
+			generated_at DATETIME NOT NULL
+		)`,
+		"PRAGMA user_version = 1",
+	}
+	for _, stmt := range v1Statements {
+		if _, execErr := db.SQLDB().Exec(stmt); execErr != nil {
+			t.Fatalf("failed to create v1 schema: %v", execErr)
+		}
+	}
+
+	now := "2025-01-15T10:00:00Z"
+	for _, f := range []struct{ path, agent, summary string }{
+		{"notes/alpha.md", "agent-a", "alpha notes"},
+		{"notes/beta.md", "agent-b", "beta notes"},
+	} {
+		_, err = db.SQLDB().Exec(
+			"INSERT INTO files (filepath, source_agent, summary, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+			f.path, f.agent, f.summary, now, now,
+		)
+		if err != nil {
+			t.Fatalf("failed to insert file %s: %v", f.path, err)
+		}
+	}
+
+	for _, e := range []struct {
+		path string
+		vec  []float32
+	}{
+		{"notes/alpha.md", []float32{0.1, 0.2, 0.3}},
+		{"notes/beta.md", []float32{0.4, 0.5, 0.6}},
+	} {
+		_, err = db.SQLDB().Exec(
+			"INSERT INTO embeddings (filepath, vector, model_id, generated_at) VALUES (?, ?, ?, ?)",
+			e.path, store.EncodeVector(e.vec), "nomic-embed-text", now,
+		)
+		if err != nil {
+			t.Fatalf("failed to insert v1 embedding for %s: %v", e.path, err)
+		}
+	}
 }

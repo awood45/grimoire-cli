@@ -22,14 +22,17 @@ func NewSQLiteEmbeddingRepository(db *DB) *SQLiteEmbeddingRepository {
 	return &SQLiteEmbeddingRepository{db: db}
 }
 
-// Upsert inserts or replaces an embedding for the given filepath.
-func (r *SQLiteEmbeddingRepository) Upsert(ctx context.Context, filepath string, vector []float32, modelID string) error {
-	blob := EncodeVector(vector)
+// Upsert inserts or replaces an embedding for the given (filepath, chunk_index) pair.
+func (r *SQLiteEmbeddingRepository) Upsert(ctx context.Context, emb Embedding) error { //nolint:gocritic // hugeParam: interface requires value type.
+	blob := EncodeVector(emb.Vector)
 	now := time.Now().UTC()
 
 	_, err := r.db.SQLDB().ExecContext(ctx,
-		"INSERT OR REPLACE INTO embeddings (filepath, vector, model_id, generated_at) VALUES (?, ?, ?, ?)",
-		filepath, blob, modelID, now,
+		`INSERT OR REPLACE INTO embeddings
+		 (filepath, chunk_index, vector, model_id, generated_at, chunk_start, chunk_end, is_summary)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		emb.Filepath, emb.ChunkIndex, blob, emb.ModelID, now,
+		emb.ChunkStart, emb.ChunkEnd, emb.IsSummary,
 	)
 	if err != nil {
 		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to upsert embedding")
@@ -37,16 +40,19 @@ func (r *SQLiteEmbeddingRepository) Upsert(ctx context.Context, filepath string,
 	return nil
 }
 
-// Get retrieves the embedding for the given filepath.
-// Returns METADATA_NOT_FOUND if the embedding does not exist.
+// Get retrieves a single representative embedding for the given filepath.
+// Returns the embedding with the lowest chunk_index (summary at -1 if it exists, else chunk 0).
+// Returns METADATA_NOT_FOUND if no embedding exists for the filepath.
 func (r *SQLiteEmbeddingRepository) Get(ctx context.Context, filepath string) (Embedding, error) {
 	var emb Embedding
 	var blob []byte
 
 	err := r.db.SQLDB().QueryRowContext(ctx,
-		"SELECT filepath, vector, model_id, generated_at FROM embeddings WHERE filepath = ?",
+		`SELECT filepath, chunk_index, vector, model_id, generated_at, chunk_start, chunk_end, is_summary
+		 FROM embeddings WHERE filepath = ? ORDER BY chunk_index ASC LIMIT 1`,
 		filepath,
-	).Scan(&emb.Filepath, &blob, &emb.ModelID, &emb.GeneratedAt)
+	).Scan(&emb.Filepath, &emb.ChunkIndex, &blob, &emb.ModelID, &emb.GeneratedAt,
+		&emb.ChunkStart, &emb.ChunkEnd, &emb.IsSummary)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		return Embedding{}, sberrors.Newf(sberrors.ErrCodeMetadataNotFound,
@@ -60,9 +66,45 @@ func (r *SQLiteEmbeddingRepository) Get(ctx context.Context, filepath string) (E
 	return emb, nil
 }
 
-// Delete removes the embedding for the given filepath.
-// Does not return an error if the embedding does not exist.
-func (r *SQLiteEmbeddingRepository) Delete(ctx context.Context, filepath string) error {
+// GetForFile returns all embeddings for a file, ordered by chunk_index ascending.
+// Returns METADATA_NOT_FOUND if no embeddings exist for the filepath.
+func (r *SQLiteEmbeddingRepository) GetForFile(ctx context.Context, filepath string) ([]Embedding, error) {
+	rows, err := r.db.SQLDB().QueryContext(ctx,
+		`SELECT filepath, chunk_index, vector, model_id, generated_at, chunk_start, chunk_end, is_summary
+		 FROM embeddings WHERE filepath = ? ORDER BY chunk_index ASC`,
+		filepath,
+	)
+	if err != nil {
+		return nil, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to query embeddings for file")
+	}
+	defer rows.Close()
+
+	var result []Embedding
+	for rows.Next() {
+		var emb Embedding
+		var blob []byte
+		if err := rows.Scan(&emb.Filepath, &emb.ChunkIndex, &blob, &emb.ModelID, &emb.GeneratedAt,
+			&emb.ChunkStart, &emb.ChunkEnd, &emb.IsSummary); err != nil {
+			return nil, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to scan embedding row")
+		}
+		emb.Vector = DecodeVector(blob)
+		result = append(result, emb)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "error iterating embedding rows")
+	}
+
+	if len(result) == 0 {
+		return nil, sberrors.Newf(sberrors.ErrCodeMetadataNotFound,
+			"embeddings not found for %q", filepath)
+	}
+
+	return result, nil
+}
+
+// DeleteForFile removes all embeddings for the given filepath.
+// Does not return an error if no embeddings exist for the filepath.
+func (r *SQLiteEmbeddingRepository) DeleteForFile(ctx context.Context, filepath string) error {
 	_, err := r.db.SQLDB().ExecContext(ctx,
 		"DELETE FROM embeddings WHERE filepath = ?",
 		filepath,
@@ -76,7 +118,8 @@ func (r *SQLiteEmbeddingRepository) Delete(ctx context.Context, filepath string)
 // GetAll retrieves all stored embeddings with decoded vectors.
 func (r *SQLiteEmbeddingRepository) GetAll(ctx context.Context) ([]Embedding, error) {
 	rows, err := r.db.SQLDB().QueryContext(ctx,
-		"SELECT filepath, vector, model_id, generated_at FROM embeddings",
+		`SELECT filepath, chunk_index, vector, model_id, generated_at, chunk_start, chunk_end, is_summary
+		 FROM embeddings`,
 	)
 	if err != nil {
 		return nil, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to query embeddings")
@@ -87,7 +130,8 @@ func (r *SQLiteEmbeddingRepository) GetAll(ctx context.Context) ([]Embedding, er
 	for rows.Next() {
 		var emb Embedding
 		var blob []byte
-		if err := rows.Scan(&emb.Filepath, &blob, &emb.ModelID, &emb.GeneratedAt); err != nil {
+		if err := rows.Scan(&emb.Filepath, &emb.ChunkIndex, &blob, &emb.ModelID, &emb.GeneratedAt,
+			&emb.ChunkStart, &emb.ChunkEnd, &emb.IsSummary); err != nil {
 			return nil, sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to scan embedding row")
 		}
 		emb.Vector = DecodeVector(blob)

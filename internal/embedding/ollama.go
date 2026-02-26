@@ -30,22 +30,22 @@ func NewOllamaProvider(baseURL, model string) *OllamaProvider {
 }
 
 type ollamaRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model string `json:"model"`
+	Input string `json:"input"`
 }
 
 type ollamaResponse struct {
-	Embedding []float32 `json:"embedding"`
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
 // GenerateEmbedding calls the Ollama API to generate a vector embedding.
 func (p *OllamaProvider) GenerateEmbedding(ctx context.Context, text string) ([]float32, error) {
-	body, err := json.Marshal(ollamaRequest{Model: p.model, Prompt: text})
+	body, err := json.Marshal(ollamaRequest{Model: p.model, Input: text})
 	if err != nil {
 		return nil, sberrors.Wrap(err, sberrors.ErrCodeEmbeddingError, "failed to marshal request")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/api/embeddings", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/api/embed", bytes.NewReader(body))
 	if err != nil {
 		return nil, sberrors.Wrap(err, sberrors.ErrCodeEmbeddingError, "failed to create request")
 	}
@@ -70,7 +70,11 @@ func (p *OllamaProvider) GenerateEmbedding(ctx context.Context, text string) ([]
 		return nil, sberrors.Wrap(err, sberrors.ErrCodeEmbeddingError, "failed to decode response")
 	}
 
-	return result.Embedding, nil
+	if len(result.Embeddings) == 0 {
+		return nil, sberrors.Newf(sberrors.ErrCodeEmbeddingError, "Ollama API returned empty embeddings array")
+	}
+
+	return result.Embeddings[0], nil
 }
 
 // ModelID returns the configured model name.
