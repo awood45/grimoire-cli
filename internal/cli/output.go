@@ -31,6 +31,19 @@ func WriteSuccess(w io.Writer, data interface{}) {
 	writeJSON(w, successEnvelope{OK: true, Data: data})
 }
 
+// successWithWarningEnvelope is the JSON envelope for successful responses that include a warning.
+type successWithWarningEnvelope struct {
+	OK      bool        `json:"ok"`
+	Data    interface{} `json:"data"`
+	Warning string      `json:"warning"`
+}
+
+// WriteSuccessWithWarning writes a JSON success envelope with an additional warning field.
+// Used when an operation succeeds but a non-fatal issue occurred (e.g., embedding generation failed).
+func WriteSuccessWithWarning(w io.Writer, data interface{}, warning string) {
+	writeJSON(w, successWithWarningEnvelope{OK: true, Data: data, Warning: warning})
+}
+
 // WriteError writes a JSON error envelope to w.
 // If err is an *sberrors.Error, its code and message are used.
 // Otherwise, the error is wrapped as INTERNAL_ERROR.

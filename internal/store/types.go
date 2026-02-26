@@ -12,12 +12,16 @@ type FileMetadata struct {
 	UpdatedAt   time.Time
 }
 
-// Embedding represents a vector embedding for a file.
+// Embedding represents a vector embedding for a file (or a chunk of a file).
 type Embedding struct {
 	Filepath    string
+	ChunkIndex  int // 0-based chunk index; -1 for summary
 	Vector      []float32
 	ModelID     string
 	GeneratedAt time.Time
+	ChunkStart  int  // Byte offset in source file
+	ChunkEnd    int  // Byte offset (exclusive)
+	IsSummary   bool // True for summary embeddings
 }
 
 // SearchFilters defines criteria for filtering file metadata queries.

@@ -50,7 +50,7 @@ func runArchiveFile(cmd *cobra.Command, _ []string) error {
 	// Archive file.
 	manager := metadata.NewManager(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder, appCtx.Locker,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen, appCtx.Locker,
 	)
 
 	result, archiveErr := manager.Archive(context.Background(), fp)

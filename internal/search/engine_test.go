@@ -39,7 +39,7 @@ func TestSearch_delegatesToRepo(t *testing.T) {
 		UpdatedAt:   now,
 	}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	filters := store.SearchFilters{
@@ -60,7 +60,7 @@ func TestSearch_delegatesToRepo_error(t *testing.T) {
 
 	fileRepo.SearchErr = sberrors.New(sberrors.ErrCodeDatabaseError, "db error")
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Search(ctx, store.SearchFilters{})
@@ -99,19 +99,19 @@ func TestSimilar_byText(t *testing.T) {
 	}
 
 	// Vector close to query [1,0,0].
-	embRepo.Data["notes/a.md"] = store.Embedding{
+	embRepo.Data["notes/a.md"] = []store.Embedding{{
 		Filepath: "notes/a.md",
 		Vector:   []float32{0.9, 0.1, 0.0},
 		ModelID:  "fake-model",
-	}
+	}}
 	// Vector far from query [1,0,0].
-	embRepo.Data["notes/b.md"] = store.Embedding{
+	embRepo.Data["notes/b.md"] = []store.Embedding{{
 		Filepath: "notes/b.md",
 		Vector:   []float32{0.0, 0.0, 1.0},
 		ModelID:  "fake-model",
-	}
+	}}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	results, err := eng.Similar(ctx, SimilarInput{
@@ -125,7 +125,7 @@ func TestSimilar_byText(t *testing.T) {
 	assert.Equal(t, "notes/a.md", results[0].Filepath)
 	assert.Greater(t, results[0].Score, results[1].Score)
 
-	// Verify the embedding was generated for the input text.
+	// Verify the embedding was generated for the input text (no prefix since queryPrefix is "").
 	assert.Equal(t, []string{"find similar"}, provider.GenerateCalls)
 }
 
@@ -160,23 +160,23 @@ func TestSimilar_byFile(t *testing.T) {
 		UpdatedAt:   now,
 	}
 
-	embRepo.Data["notes/query.md"] = store.Embedding{
+	embRepo.Data["notes/query.md"] = []store.Embedding{{
 		Filepath: "notes/query.md",
 		Vector:   []float32{1.0, 0.0, 0.0},
 		ModelID:  "fake-model",
-	}
-	embRepo.Data["notes/a.md"] = store.Embedding{
+	}}
+	embRepo.Data["notes/a.md"] = []store.Embedding{{
 		Filepath: "notes/a.md",
 		Vector:   []float32{0.9, 0.1, 0.0},
 		ModelID:  "fake-model",
-	}
-	embRepo.Data["notes/b.md"] = store.Embedding{
+	}}
+	embRepo.Data["notes/b.md"] = []store.Embedding{{
 		Filepath: "notes/b.md",
 		Vector:   []float32{0.0, 0.0, 1.0},
 		ModelID:  "fake-model",
-	}
+	}}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	results, err := eng.Similar(ctx, SimilarInput{
@@ -199,7 +199,7 @@ func TestSimilar_noEmbeddingProvider(t *testing.T) {
 	embRepo := storetest.NewFakeEmbeddingRepository()
 	noopProvider := &embedding.NoopProvider{}
 
-	eng := NewEngine(fileRepo, embRepo, noopProvider)
+	eng := NewEngine(fileRepo, embRepo, noopProvider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{
@@ -229,14 +229,14 @@ func TestSimilar_limit(t *testing.T) {
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
-		embRepo.Data[fp] = store.Embedding{
+		embRepo.Data[fp] = []store.Embedding{{
 			Filepath: fp,
 			Vector:   []float32{0.5, 0.5, 0.0},
 			ModelID:  "fake-model",
-		}
+		}}
 	}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	results, err := eng.Similar(ctx, SimilarInput{
@@ -267,7 +267,7 @@ func TestListTags_delegatesToRepo(t *testing.T) {
 		UpdatedAt: now,
 	}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	tags, err := eng.ListTags(ctx, "name")
@@ -289,7 +289,7 @@ func TestListTags_delegatesToRepo_error(t *testing.T) {
 
 	fileRepo.ListTagsErr = sberrors.New(sberrors.ErrCodeDatabaseError, "db error")
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.ListTags(ctx, "name")
@@ -304,7 +304,7 @@ func TestSimilar_embeddingGenerationError(t *testing.T) {
 	provider := embtest.NewFakeProvider()
 	provider.GenerateErr = sberrors.New(sberrors.ErrCodeEmbeddingError, "embedding failed")
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{
@@ -321,7 +321,7 @@ func TestSimilar_fileEmbeddingNotFound(t *testing.T) {
 	embRepo := storetest.NewFakeEmbeddingRepository()
 	provider := embtest.NewFakeProvider()
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{
@@ -340,7 +340,7 @@ func TestSimilar_getAllError(t *testing.T) {
 
 	embRepo.GetAllErr = sberrors.New(sberrors.ErrCodeDatabaseError, "getall failed")
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{
@@ -358,7 +358,7 @@ func TestSimilar_noEmbeddings(t *testing.T) {
 	provider := embtest.NewFakeProvider()
 	provider.FixedVector = []float32{1.0, 0.0, 0.0}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	results, err := eng.Similar(ctx, SimilarInput{
@@ -377,13 +377,13 @@ func TestSimilar_metadataFetchError(t *testing.T) {
 	provider.FixedVector = []float32{1.0, 0.0, 0.0}
 
 	// Add embedding but no metadata.
-	embRepo.Data["notes/a.md"] = store.Embedding{
+	embRepo.Data["notes/a.md"] = []store.Embedding{{
 		Filepath: "notes/a.md",
 		Vector:   []float32{0.9, 0.1, 0.0},
 		ModelID:  "fake-model",
-	}
+	}}
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{
@@ -399,10 +399,174 @@ func TestSimilar_emptyInput(t *testing.T) {
 	embRepo := storetest.NewFakeEmbeddingRepository()
 	provider := embtest.NewFakeProvider()
 
-	eng := NewEngine(fileRepo, embRepo, provider)
+	eng := NewEngine(fileRepo, embRepo, provider, "")
 	ctx := context.Background()
 
 	_, err := eng.Similar(ctx, SimilarInput{})
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+// TestSimilar_ChunkDedup verifies that multiple chunks per file are deduplicated to best score per file (FR-6).
+func TestSimilar_ChunkDedup(t *testing.T) {
+	fileRepo := storetest.NewFakeFileRepository()
+	embRepo := storetest.NewFakeEmbeddingRepository()
+	provider := embtest.NewFakeProvider()
+
+	queryVec := []float32{1.0, 0.0, 0.0}
+	provider.FixedVector = queryVec
+
+	now := time.Now()
+
+	// File A has two chunks: one close to query, one far.
+	fileRepo.Data["notes/a.md"] = store.FileMetadata{
+		Filepath:    "notes/a.md",
+		SourceAgent: "claude",
+		Summary:     "File A",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	embRepo.Data["notes/a.md"] = []store.Embedding{
+		{
+			Filepath:   "notes/a.md",
+			ChunkIndex: 0,
+			Vector:     []float32{0.5, 0.5, 0.0}, // moderate similarity
+			ModelID:    "fake-model",
+		},
+		{
+			Filepath:   "notes/a.md",
+			ChunkIndex: 1,
+			Vector:     []float32{0.95, 0.05, 0.0}, // high similarity (best chunk)
+			ModelID:    "fake-model",
+		},
+	}
+
+	// File B has two chunks: both far from query.
+	fileRepo.Data["notes/b.md"] = store.FileMetadata{
+		Filepath:    "notes/b.md",
+		SourceAgent: "claude",
+		Summary:     "File B",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	embRepo.Data["notes/b.md"] = []store.Embedding{
+		{
+			Filepath:   "notes/b.md",
+			ChunkIndex: 0,
+			Vector:     []float32{0.0, 0.0, 1.0}, // low similarity
+			ModelID:    "fake-model",
+		},
+		{
+			Filepath:   "notes/b.md",
+			ChunkIndex: 1,
+			Vector:     []float32{0.1, 0.0, 0.9}, // low similarity
+			ModelID:    "fake-model",
+		},
+	}
+
+	eng := NewEngine(fileRepo, embRepo, provider, "")
+	ctx := context.Background()
+
+	results, err := eng.Similar(ctx, SimilarInput{
+		Text:  "find similar",
+		Limit: 10,
+	})
+	require.NoError(t, err)
+
+	// Should have exactly 2 results (one per file, not one per chunk).
+	require.Len(t, results, 2)
+
+	// File A should rank first (its best chunk score is higher than B's best).
+	assert.Equal(t, "notes/a.md", results[0].Filepath)
+	assert.Equal(t, "notes/b.md", results[1].Filepath)
+
+	// Verify scores are the best-chunk scores, not averages or sums.
+	expectedScoreA := CosineSimilarity(queryVec, []float32{0.95, 0.05, 0.0})
+	expectedScoreB := CosineSimilarity(queryVec, []float32{0.1, 0.0, 0.9})
+	assert.InDelta(t, expectedScoreA, results[0].Score, 1e-6)
+	assert.InDelta(t, expectedScoreB, results[1].Score, 1e-6)
+}
+
+// TestSimilar_QueryPrefix verifies that queryPrefix is prepended to text before embedding generation (FR-5).
+func TestSimilar_QueryPrefix(t *testing.T) {
+	fileRepo := storetest.NewFakeFileRepository()
+	embRepo := storetest.NewFakeEmbeddingRepository()
+	provider := embtest.NewFakeProvider()
+	provider.FixedVector = []float32{1.0, 0.0, 0.0}
+
+	eng := NewEngine(fileRepo, embRepo, provider, "search_query: ")
+	ctx := context.Background()
+
+	// Even with no embeddings to match, the embedding generation should still happen.
+	_, err := eng.Similar(ctx, SimilarInput{
+		Text:  "find similar",
+		Limit: 10,
+	})
+	require.NoError(t, err)
+
+	// Verify the FakeProvider received the prefixed text.
+	require.Len(t, provider.GenerateCalls, 1)
+	assert.Equal(t, "search_query: find similar", provider.GenerateCalls[0])
+}
+
+// TestSimilar_ExcludeFile verifies that SimilarByFile excludes the query file from results.
+func TestSimilar_ExcludeFile(t *testing.T) {
+	fileRepo := storetest.NewFakeFileRepository()
+	embRepo := storetest.NewFakeEmbeddingRepository()
+	provider := embtest.NewFakeProvider()
+
+	now := time.Now()
+
+	fileRepo.Data["notes/query.md"] = store.FileMetadata{
+		Filepath:    "notes/query.md",
+		SourceAgent: "claude",
+		Summary:     "Query file",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	fileRepo.Data["notes/other.md"] = store.FileMetadata{
+		Filepath:    "notes/other.md",
+		SourceAgent: "claude",
+		Summary:     "Other file",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+
+	// Query file has multiple chunks.
+	embRepo.Data["notes/query.md"] = []store.Embedding{
+		{
+			Filepath:   "notes/query.md",
+			ChunkIndex: 0,
+			Vector:     []float32{1.0, 0.0, 0.0},
+			ModelID:    "fake-model",
+		},
+		{
+			Filepath:   "notes/query.md",
+			ChunkIndex: 1,
+			Vector:     []float32{0.9, 0.1, 0.0},
+			ModelID:    "fake-model",
+		},
+	}
+	embRepo.Data["notes/other.md"] = []store.Embedding{{
+		Filepath:   "notes/other.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.8, 0.2, 0.0},
+		ModelID:    "fake-model",
+	}}
+
+	eng := NewEngine(fileRepo, embRepo, provider, "")
+	ctx := context.Background()
+
+	results, err := eng.Similar(ctx, SimilarInput{
+		FilePath: "notes/query.md",
+		Limit:    10,
+	})
+	require.NoError(t, err)
+
+	// Should not include the query file itself in results, even with multiple chunks.
+	require.Len(t, results, 1)
+	assert.Equal(t, "notes/other.md", results[0].Filepath)
+
+	// Should not have called GenerateEmbedding since we used a file.
+	assert.Empty(t, provider.GenerateCalls)
 }

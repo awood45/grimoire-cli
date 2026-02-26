@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/awood45/grimoire-cli/internal/brain"
+	"github.com/awood45/grimoire-cli/internal/embedding"
 	"github.com/awood45/grimoire-cli/internal/ledger"
 	"github.com/awood45/grimoire-cli/internal/sberrors"
 	"github.com/awood45/grimoire-cli/internal/store"
@@ -54,6 +55,7 @@ type testHarness struct {
 	ledger   *ledgertesting.FakeLedger
 	fm       *fmtesting.FakeFrontmatterService
 	embedder *embeddingtesting.FakeProvider
+	embGen   *embedding.Generator
 	locker   *filelocktesting.FakeLocker
 	docGen   *docgentesting.FakeGenerator
 	db       *fakeDBManager
@@ -88,11 +90,12 @@ func newTestHarness(t *testing.T) *testHarness {
 	led := ledgertesting.NewFakeLedger()
 	fm := fmtesting.NewFakeFrontmatterService()
 	embedder := embeddingtesting.NewFakeProvider()
+	embGen := embedding.NewGenerator(embedder, embRepo, "search_document: ", 4096, 512)
 	locker := filelocktesting.NewFakeLocker()
 	docGen := docgentesting.NewFakeGenerator()
 	db := &fakeDBManager{}
 
-	svc := NewService(b, fileRepo, embRepo, led, fm, embedder, locker, docGen, db)
+	svc := NewService(b, fileRepo, embRepo, led, fm, embGen, locker, docGen, db)
 
 	return &testHarness{
 		svc:      svc,
@@ -102,6 +105,7 @@ func newTestHarness(t *testing.T) *testHarness {
 		ledger:   led,
 		fm:       fm,
 		embedder: embedder,
+		embGen:   embGen,
 		locker:   locker,
 		docGen:   docGen,
 		db:       db,
@@ -1109,11 +1113,11 @@ func TestHardRebuild_orphanedDeletesEmbedding(t *testing.T) {
 		Filepath: "ghost.md", SourceAgent: "test",
 		CreatedAt: now, UpdatedAt: now,
 	}
-	h.embRepo.Data["ghost.md"] = store.Embedding{
+	h.embRepo.Data["ghost.md"] = []store.Embedding{{
 		Filepath: "ghost.md",
 		Vector:   []float32{0.1, 0.2},
 		ModelID:  "model",
-	}
+	}}
 
 	_, err := h.svc.HardRebuild(ctx)
 	if err != nil {
@@ -1200,11 +1204,12 @@ func TestNewService(t *testing.T) {
 	led := ledgertesting.NewFakeLedger()
 	fm := fmtesting.NewFakeFrontmatterService()
 	embedder := embeddingtesting.NewFakeProvider()
+	embGen := embedding.NewGenerator(embedder, embRepo, "search_document: ", 4096, 512)
 	locker := filelocktesting.NewFakeLocker()
 	docGen := docgentesting.NewFakeGenerator()
 	db := &fakeDBManager{}
 
-	svc := NewService(b, fileRepo, embRepo, led, fm, embedder, locker, docGen, db)
+	svc := NewService(b, fileRepo, embRepo, led, fm, embGen, locker, docGen, db)
 	if svc == nil {
 		t.Fatal("NewService returned nil")
 	}
@@ -1225,11 +1230,12 @@ func TestHardRebuild_noFilesDir(t *testing.T) {
 	led := ledgertesting.NewFakeLedger()
 	fm := fmtesting.NewFakeFrontmatterService()
 	embedder := embeddingtesting.NewFakeProvider()
+	embGen := embedding.NewGenerator(embedder, embRepo, "search_document: ", 4096, 512)
 	locker := filelocktesting.NewFakeLocker()
 	docGen := docgentesting.NewFakeGenerator()
 	db := &fakeDBManager{}
 
-	svc := NewService(b, fileRepo, embRepo, led, fm, embedder, locker, docGen, db)
+	svc := NewService(b, fileRepo, embRepo, led, fm, embGen, locker, docGen, db)
 
 	report, err := svc.HardRebuild(context.Background())
 	if err != nil {
@@ -1771,11 +1777,12 @@ func TestStatus_noFilesDir(t *testing.T) {
 	led := ledgertesting.NewFakeLedger()
 	fm := fmtesting.NewFakeFrontmatterService()
 	embedder := embeddingtesting.NewFakeProvider()
+	embGen := embedding.NewGenerator(embedder, embRepo, "search_document: ", 4096, 512)
 	locker := filelocktesting.NewFakeLocker()
 	docGen := docgentesting.NewFakeGenerator()
 	db := &fakeDBManager{}
 
-	svc := NewService(b, fileRepo, embRepo, led, fm, embedder, locker, docGen, db)
+	svc := NewService(b, fileRepo, embRepo, led, fm, embGen, locker, docGen, db)
 
 	report, err := svc.Status(context.Background())
 	if err != nil {
@@ -2011,5 +2018,153 @@ func TestStatus_writeDocError(t *testing.T) {
 	}
 	if !sberrors.HasCode(err, sberrors.ErrCodeInternalError) {
 		t.Errorf("error = %v, want INTERNAL_ERROR code", err)
+	}
+}
+
+// TestStatus_embeddingSchemaStale_FR12 verifies FR-12: Status detects stale v1-era embeddings.
+func TestStatus_embeddingSchemaStale_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// Insert a v1-era embedding: chunk_index=0, chunk_start=0, chunk_end=0.
+	h.embRepo.Data["old.md"] = []store.Embedding{{
+		Filepath:   "old.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.2},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   0,
+	}}
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if !report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = false, want true")
+	}
+	expectedMsg := "Embeddings were generated with schema v1. Run 'grimoire-cli hard-rebuild' to re-generate with chunking and prefixes."
+	if report.EmbeddingSchemaMessage != expectedMsg {
+		t.Errorf("EmbeddingSchemaMessage = %q, want %q", report.EmbeddingSchemaMessage, expectedMsg)
+	}
+}
+
+// TestStatus_embeddingSchemaNotStale_FR12 verifies FR-12: Status reports not stale when embeddings have proper chunk data.
+func TestStatus_embeddingSchemaNotStale_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// Insert a v2-era embedding with proper chunk offsets.
+	h.embRepo.Data["new.md"] = []store.Embedding{{
+		Filepath:   "new.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.2},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   100,
+	}}
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = true, want false for v2 embeddings")
+	}
+	if report.EmbeddingSchemaMessage != "" {
+		t.Errorf("EmbeddingSchemaMessage = %q, want empty", report.EmbeddingSchemaMessage)
+	}
+}
+
+// TestStatus_embeddingSchemaNotStale_noEmbeddings_FR12 verifies FR-12: no embeddings means not stale.
+func TestStatus_embeddingSchemaNotStale_noEmbeddings_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = true, want false when no embeddings exist")
+	}
+}
+
+// TestStatus_embeddingSchemaStale_mixedEmbeddings_FR12 verifies FR-12: even one stale embedding triggers the flag.
+func TestStatus_embeddingSchemaStale_mixedEmbeddings_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// One proper v2 embedding with non-zero chunk_end.
+	h.embRepo.Data["v2.md"] = []store.Embedding{{
+		Filepath:   "v2.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.2},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   200,
+	}}
+
+	// One v1-era stale embedding.
+	h.embRepo.Data["v1.md"] = []store.Embedding{{
+		Filepath:   "v1.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.3, 0.4},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   0,
+	}}
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if !report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = false, want true when any stale embedding exists")
+	}
+}
+
+// TestHardRebuild_usesGenerator_FR14 verifies FR-14: HardRebuild uses Generator for embedding generation.
+func TestHardRebuild_usesGenerator_FR14(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// Create an untracked file.
+	h.createFile(t, "gen.md", "content for generator")
+	absPath := filepath.Join(h.brain.FilesDir(), "gen.md")
+
+	now := time.Now().UTC().Truncate(time.Second)
+	h.fm.Data[absPath] = store.FileMetadata{
+		Filepath: "gen.md", SourceAgent: "test",
+		CreatedAt: now, UpdatedAt: now,
+	}
+
+	_, err := h.svc.HardRebuild(ctx)
+	if err != nil {
+		t.Fatalf("HardRebuild() error = %v", err)
+	}
+
+	// Verify that the Generator was used (it delegates to the embedder with the doc prefix).
+	if len(h.embedder.GenerateCalls) != 1 {
+		t.Fatalf("GenerateEmbedding calls = %d, want 1", len(h.embedder.GenerateCalls))
+	}
+
+	// The Generator prepends the document prefix to the content.
+	expectedPrefix := "search_document: "
+	call := h.embedder.GenerateCalls[0]
+	if len(call) < len(expectedPrefix) || call[:len(expectedPrefix)] != expectedPrefix {
+		t.Errorf("GenerateEmbedding call = %q, want prefix %q", call, expectedPrefix)
+	}
+
+	// Verify embedding was stored via the Generator (which uses DeleteForFile then Upsert).
+	if len(h.embRepo.DeleteCalls) != 1 {
+		t.Errorf("DeleteForFile calls = %d, want 1", len(h.embRepo.DeleteCalls))
+	}
+	if len(h.embRepo.UpsertCalls) != 1 {
+		t.Errorf("Upsert calls = %d, want 1", len(h.embRepo.UpsertCalls))
 	}
 }

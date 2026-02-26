@@ -85,6 +85,7 @@ func TestNewAppContext_success(t *testing.T) {
 	assert.NotNil(t, ctx.EmbRepo)
 	assert.NotNil(t, ctx.Ledger)
 	assert.NotNil(t, ctx.Embedder)
+	assert.NotNil(t, ctx.EmbGen)
 	assert.NotNil(t, ctx.FM)
 	assert.NotNil(t, ctx.Locker)
 	assert.NotNil(t, ctx.DocGen)
@@ -125,6 +126,8 @@ func TestNewAppContext_invalidConfig(t *testing.T) {
 }
 
 // TestNewAppContext_schemaVersionMismatch verifies error on wrong DB schema version.
+// MigrateIfNeeded() now runs before CheckVersion and rejects unknown versions
+// with ErrCodeDatabaseError.
 func TestNewAppContext_schemaVersionMismatch(t *testing.T) {
 	t.Parallel()
 
@@ -141,7 +144,39 @@ func TestNewAppContext_schemaVersionMismatch(t *testing.T) {
 	ctx, err := NewAppContext(basePath)
 	assert.Nil(t, ctx)
 	require.Error(t, err)
-	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeSchemaVersion))
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeDatabaseError))
+}
+
+// TestNewAppContext_migratesV1ToV2 verifies that a v1 database is automatically migrated (FR-10).
+func TestNewAppContext_migratesV1ToV2(t *testing.T) {
+	t.Parallel()
+
+	basePath := t.TempDir()
+	setupGrimoire(t, basePath, nil)
+
+	// Downgrade the DB to v1 schema by setting user_version=1 and recreating
+	// the old-style embeddings table (single primary key on filepath).
+	db, err := store.NewDB(filepath.Join(basePath, "db", "grimoire.sqlite"))
+	require.NoError(t, err)
+	_, execErr := db.SQLDB().Exec("DROP TABLE IF EXISTS embeddings")
+	require.NoError(t, execErr)
+	_, execErr = db.SQLDB().Exec(`CREATE TABLE embeddings (
+		filepath TEXT PRIMARY KEY REFERENCES files(filepath) ON DELETE CASCADE,
+		vector BLOB NOT NULL,
+		model_id TEXT NOT NULL,
+		generated_at DATETIME NOT NULL
+	)`)
+	require.NoError(t, execErr)
+	_, execErr = db.SQLDB().Exec("PRAGMA user_version = 1")
+	require.NoError(t, execErr)
+	require.NoError(t, db.Close())
+
+	// NewAppContext should auto-migrate and succeed.
+	ctx, err := NewAppContext(basePath)
+	require.NoError(t, err)
+	require.NotNil(t, ctx)
+	assert.NotNil(t, ctx.EmbGen)
+	assert.NoError(t, ctx.Close())
 }
 
 // TestNewAppContext_ollamaProvider verifies that ollama provider is constructed.

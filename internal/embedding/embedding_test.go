@@ -14,20 +14,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOllamaProvider_GenerateEmbedding_success(t *testing.T) {
+func TestOllamaProvider_Embed_Success(t *testing.T) {
 	expected := []float32{0.1, 0.2, 0.3, 0.4}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/api/embeddings", r.URL.Path)
+		assert.Equal(t, "/api/embed", r.URL.Path)
 		assert.Equal(t, http.MethodPost, r.Method)
 
 		var req ollamaRequest
 		assert.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		assert.Equal(t, "test-model", req.Model)
-		assert.Equal(t, "hello world", req.Prompt)
+		assert.Equal(t, "hello world", req.Input)
 
 		w.Header().Set("Content-Type", "application/json")
-		resp := ollamaResponse{Embedding: expected}
+		resp := ollamaResponse{Embeddings: [][]float32{expected}}
 		assert.NoError(t, json.NewEncoder(w).Encode(resp))
 	}))
 	defer server.Close()
@@ -38,7 +38,7 @@ func TestOllamaProvider_GenerateEmbedding_success(t *testing.T) {
 	assert.Equal(t, expected, result)
 }
 
-func TestOllamaProvider_GenerateEmbedding_serverError(t *testing.T) {
+func TestOllamaProvider_Embed_ServerError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte("internal error"))
@@ -49,6 +49,24 @@ func TestOllamaProvider_GenerateEmbedding_serverError(t *testing.T) {
 	_, err := provider.GenerateEmbedding(context.Background(), "hello")
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingError))
+}
+
+func TestOllamaProvider_Embed_EmptyEmbeddings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/embed", r.URL.Path)
+
+		w.Header().Set("Content-Type", "application/json")
+		// Return a valid JSON response but with an empty embeddings array.
+		resp := ollamaResponse{Embeddings: [][]float32{}}
+		assert.NoError(t, json.NewEncoder(w).Encode(resp))
+	}))
+	defer server.Close()
+
+	provider := NewOllamaProvider(server.URL, "test-model")
+	_, err := provider.GenerateEmbedding(context.Background(), "hello")
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeEmbeddingError))
+	assert.Contains(t, err.Error(), "empty embeddings")
 }
 
 func TestOllamaProvider_GenerateEmbedding_serverDown(t *testing.T) {

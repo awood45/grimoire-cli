@@ -43,7 +43,10 @@ func runInit(cmd *cobra.Command, _ []string) error {
 
 	homeDir := os.Getenv(envHomePath)
 	if homeDir == "" {
-		homeDir, _ = os.UserHomeDir()
+		homeDir, err = os.UserHomeDir()
+		if err != nil {
+			return err
+		}
 	}
 	detector := platform.NewDetector(homeDir)
 

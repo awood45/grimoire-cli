@@ -47,7 +47,7 @@ func runRebuild(cmd *cobra.Command, _ []string) error {
 	// Build maintenance service.
 	service := maintenance.NewService(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen,
 		appCtx.Locker, appCtx.DocGen, appCtx.DB,
 	)
 
@@ -77,7 +77,7 @@ func runHardRebuild(cmd *cobra.Command, _ []string) error {
 	// Build maintenance service.
 	service := maintenance.NewService(
 		appCtx.Brain, appCtx.FileRepo, appCtx.EmbRepo,
-		appCtx.Ledger, appCtx.FM, appCtx.Embedder,
+		appCtx.Ledger, appCtx.FM, appCtx.EmbGen,
 		appCtx.Locker, appCtx.DocGen, appCtx.DB,
 	)
 

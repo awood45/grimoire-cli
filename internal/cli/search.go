@@ -91,7 +91,7 @@ func runSearch(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Search.
-	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder)
+	engine := search.NewEngine(appCtx.FileRepo, appCtx.EmbRepo, appCtx.Embedder, appCtx.Config.Embedding.QueryPrefix)
 	results, searchErr := engine.Search(context.Background(), filters)
 	if searchErr != nil {
 		WriteError(out, searchErr)

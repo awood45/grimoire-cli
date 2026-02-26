@@ -317,10 +317,10 @@ func TestMock_Embedding_GetAll_rowsErr(t *testing.T) {
 	ctx := context.Background()
 
 	// Must add a row so the driver reaches the RowError check.
-	rows := sqlmock.NewRows([]string{"filepath", "vector", "model_id", "generated_at"}).
-		AddRow("test.md", []byte{0, 0, 0, 0}, "model", time.Now().UTC()).
+	rows := sqlmock.NewRows([]string{"filepath", "chunk_index", "vector", "model_id", "generated_at", "chunk_start", "chunk_end", "is_summary"}).
+		AddRow("test.md", 0, []byte{0, 0, 0, 0}, "model", time.Now().UTC(), 0, 0, false).
 		RowError(0, errMock)
-	mock.ExpectQuery("SELECT filepath, vector, model_id, generated_at FROM embeddings").WillReturnRows(rows)
+	mock.ExpectQuery("SELECT filepath, chunk_index, vector, model_id, generated_at, chunk_start, chunk_end, is_summary FROM embeddings").WillReturnRows(rows)
 
 	_, err := repo.GetAll(ctx)
 	require.Error(t, err)

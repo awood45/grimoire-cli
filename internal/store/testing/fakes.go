@@ -294,48 +294,59 @@ func matchesTagFilters(meta *store.FileMetadata, filters *store.SearchFilters) b
 type FakeEmbeddingRepository struct {
 	mu sync.Mutex
 
-	// Data is the in-memory map of filepath to Embedding.
-	Data map[string]store.Embedding
+	// Data is the in-memory map of filepath to embedding slices (one per chunk).
+	Data map[string][]store.Embedding
 
 	// Error injection fields.
-	UpsertErr error
-	GetErr    error
-	DeleteErr error
-	GetAllErr error
+	UpsertErr     error
+	GetErr        error
+	GetForFileErr error
+	DeleteErr     error
+	GetAllErr     error
 
 	// UpsertCalls records the filepaths passed to Upsert.
 	UpsertCalls []string
-	// DeleteCalls records the filepaths passed to Delete.
+	// DeleteCalls records the filepaths passed to DeleteForFile.
 	DeleteCalls []string
 }
 
 // NewFakeEmbeddingRepository creates a FakeEmbeddingRepository with an initialized map.
 func NewFakeEmbeddingRepository() *FakeEmbeddingRepository {
 	return &FakeEmbeddingRepository{
-		Data: make(map[string]store.Embedding),
+		Data: make(map[string][]store.Embedding),
 	}
 }
 
 // Upsert stores or replaces an embedding in memory.
-func (f *FakeEmbeddingRepository) Upsert(_ context.Context, filepath string, vector []float32, modelID string) error {
+// If an embedding with the same (filepath, chunk_index) already exists, it is replaced.
+// Otherwise the embedding is appended to the slice for the filepath.
+func (f *FakeEmbeddingRepository) Upsert(_ context.Context, emb store.Embedding) error { //nolint:gocritic // hugeParam: interface requires value type.
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.UpsertCalls = append(f.UpsertCalls, filepath)
+	f.UpsertCalls = append(f.UpsertCalls, emb.Filepath)
 
 	if f.UpsertErr != nil {
 		return f.UpsertErr
 	}
 
-	f.Data[filepath] = store.Embedding{
-		Filepath: filepath,
-		Vector:   vector,
-		ModelID:  modelID,
+	chunks := f.Data[emb.Filepath]
+	replaced := false
+	for i, existing := range chunks {
+		if existing.ChunkIndex == emb.ChunkIndex {
+			chunks[i] = emb
+			replaced = true
+			break
+		}
 	}
+	if !replaced {
+		chunks = append(chunks, emb)
+	}
+	f.Data[emb.Filepath] = chunks
 	return nil
 }
 
-// Get retrieves an embedding by filepath.
+// Get retrieves the representative embedding (first/lowest chunk_index) for a filepath.
 func (f *FakeEmbeddingRepository) Get(_ context.Context, filepath string) (store.Embedding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -344,16 +355,48 @@ func (f *FakeEmbeddingRepository) Get(_ context.Context, filepath string) (store
 		return store.Embedding{}, f.GetErr
 	}
 
-	emb, exists := f.Data[filepath]
-	if !exists {
+	chunks, exists := f.Data[filepath]
+	if !exists || len(chunks) == 0 {
 		return store.Embedding{}, sberrors.Newf(sberrors.ErrCodeMetadataNotFound, "embedding not found: %s", filepath)
 	}
 
-	return emb, nil
+	// Return the chunk with the lowest chunk_index.
+	best := chunks[0]
+	for _, c := range chunks[1:] {
+		if c.ChunkIndex < best.ChunkIndex {
+			best = c
+		}
+	}
+
+	return best, nil
 }
 
-// Delete removes an embedding by filepath.
-func (f *FakeEmbeddingRepository) Delete(_ context.Context, filepath string) error {
+// GetForFile returns all embeddings for a file, ordered by chunk_index ascending.
+func (f *FakeEmbeddingRepository) GetForFile(_ context.Context, filepath string) ([]store.Embedding, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.GetForFileErr != nil {
+		return nil, f.GetForFileErr
+	}
+
+	chunks, exists := f.Data[filepath]
+	if !exists || len(chunks) == 0 {
+		return nil, sberrors.Newf(sberrors.ErrCodeMetadataNotFound, "embeddings not found: %s", filepath)
+	}
+
+	// Return a sorted copy.
+	result := make([]store.Embedding, len(chunks))
+	copy(result, chunks)
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].ChunkIndex < result[j].ChunkIndex
+	})
+
+	return result, nil
+}
+
+// DeleteForFile removes all embeddings for a filepath.
+func (f *FakeEmbeddingRepository) DeleteForFile(_ context.Context, filepath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -367,7 +410,7 @@ func (f *FakeEmbeddingRepository) Delete(_ context.Context, filepath string) err
 	return nil
 }
 
-// GetAll returns all embeddings.
+// GetAll returns all embeddings, sorted by filepath then chunk_index.
 func (f *FakeEmbeddingRepository) GetAll(_ context.Context) ([]store.Embedding, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -376,12 +419,15 @@ func (f *FakeEmbeddingRepository) GetAll(_ context.Context) ([]store.Embedding, 
 		return nil, f.GetAllErr
 	}
 
-	embeddings := make([]store.Embedding, 0, len(f.Data))
-	for _, emb := range f.Data {
-		embeddings = append(embeddings, emb)
+	var embeddings []store.Embedding
+	for _, chunks := range f.Data {
+		embeddings = append(embeddings, chunks...)
 	}
 
 	sort.Slice(embeddings, func(i, j int) bool {
+		if embeddings[i].Filepath == embeddings[j].Filepath {
+			return embeddings[i].ChunkIndex < embeddings[j].ChunkIndex
+		}
 		return embeddings[i].Filepath < embeddings[j].Filepath
 	})
 

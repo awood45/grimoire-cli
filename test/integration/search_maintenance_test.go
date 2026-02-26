@@ -4,8 +4,13 @@ package integration_test
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,7 +54,7 @@ func setupFullStack(t *testing.T, embProvider embedding.Provider) fullStack {
 	fileRepo := store.NewSQLiteFileRepository(ts.db)
 	embRepo := store.NewSQLiteEmbeddingRepository(ts.db)
 
-	engine := search.NewEngine(fileRepo, embRepo, effectiveEmb)
+	engine := search.NewEngine(fileRepo, embRepo, effectiveEmb, "search_query: ")
 
 	docGen, err := docgen.NewTemplateGenerator()
 	require.NoError(t, err, "failed to create doc generator")
@@ -62,9 +67,12 @@ func setupFullStack(t *testing.T, embProvider embedding.Provider) fullStack {
 
 	fm := frontmatter.NewFileService()
 
+	// Create an embedding.Generator wrapping the provider and embedding repo.
+	embGen := embedding.NewGenerator(effectiveEmb, embRepo, "search_document: ", 4096, 512)
+
 	svc := maintenance.NewService(
 		ts.b, fileRepo, embRepo, ts.led,
-		fm, effectiveEmb, locker, docGen, ts.db,
+		fm, embGen, locker, docGen, ts.db,
 	)
 
 	return fullStack{
@@ -217,9 +225,9 @@ func TestSimilarSearch(t *testing.T) {
 
 	// Override embeddings with deterministic vectors for scoring.
 	// Query will be [1, 0, 0]. a=[1,0,0] (identical), b=[0.5,0.5,0] (partial), c=[0,1,0] (orthogonal).
-	require.NoError(t, fs.embRepo.Upsert(ctx, "a.md", []float32{1, 0, 0}, "fake-model"))
-	require.NoError(t, fs.embRepo.Upsert(ctx, "b.md", []float32{0.5, 0.5, 0}, "fake-model"))
-	require.NoError(t, fs.embRepo.Upsert(ctx, "c.md", []float32{0, 1, 0}, "fake-model"))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "a.md", ChunkIndex: 0, Vector: []float32{1, 0, 0}, ModelID: "fake-model"}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "b.md", ChunkIndex: 0, Vector: []float32{0.5, 0.5, 0}, ModelID: "fake-model"}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "c.md", ChunkIndex: 0, Vector: []float32{0, 1, 0}, ModelID: "fake-model"}))
 
 	// Override the fake provider to return our query vector for the text search.
 	fakeEmb.FixedVector = []float32{1, 0, 0}
@@ -249,9 +257,9 @@ func TestSimilarByFile(t *testing.T) {
 	createTrackedFile(ctx, t, fs.testStack, "different.md", "# Different\n", "agent", []string{"d"}, "different file")
 
 	// Upsert specific vectors.
-	require.NoError(t, fs.embRepo.Upsert(ctx, "query.md", []float32{1, 0, 0}, "fake-model"))
-	require.NoError(t, fs.embRepo.Upsert(ctx, "similar.md", []float32{0.9, 0.1, 0}, "fake-model"))
-	require.NoError(t, fs.embRepo.Upsert(ctx, "different.md", []float32{0, 0, 1}, "fake-model"))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "query.md", ChunkIndex: 0, Vector: []float32{1, 0, 0}, ModelID: "fake-model"}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "similar.md", ChunkIndex: 0, Vector: []float32{0.9, 0.1, 0}, ModelID: "fake-model"}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{Filepath: "different.md", ChunkIndex: 0, Vector: []float32{0, 0, 1}, ModelID: "fake-model"}))
 
 	// Search by file: use query.md's embedding.
 	results, err := fs.engine.Similar(ctx, search.SimilarInput{FilePath: "query.md"})
@@ -517,4 +525,210 @@ func TestWriteOrderResilience(t *testing.T) {
 	assert.Equal(t, created.SourceAgent, recovered.SourceAgent)
 	assert.Equal(t, created.Summary, recovered.Summary)
 	assert.ElementsMatch(t, created.Tags, recovered.Tags)
+}
+
+// TestSimilarSearch_ChunkDedup exercises FR-6: similarity search deduplicates
+// chunks so each file appears at most once in results, using the best chunk score.
+func TestSimilarSearch_ChunkDedup(t *testing.T) {
+	ctx := context.Background()
+	fakeEmb := embtest.NewFakeProvider()
+	fs := setupFullStack(t, fakeEmb)
+
+	// Create two files with metadata (FakeProvider generates embeddings automatically).
+	createTrackedFile(ctx, t, fs.testStack, "multi-chunk.md", "# Multi\n", "agent", []string{"mc"}, "multi chunk file")
+	createTrackedFile(ctx, t, fs.testStack, "single-chunk.md", "# Single\n", "agent", []string{"sc"}, "single chunk file")
+
+	// Manually upsert multiple chunks for "multi-chunk.md" to simulate a chunked file.
+	// Chunk 0 has a lower score relative to the query, chunk 1 has a higher score.
+	require.NoError(t, fs.embRepo.DeleteForFile(ctx, "multi-chunk.md"))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{
+		Filepath:   "multi-chunk.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.5, 0.5, 0}, // partial match
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   100,
+	}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{
+		Filepath:   "multi-chunk.md",
+		ChunkIndex: 1,
+		Vector:     []float32{0.9, 0.1, 0}, // better match
+		ModelID:    "fake-model",
+		ChunkStart: 100,
+		ChunkEnd:   200,
+	}))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{
+		Filepath:   "multi-chunk.md",
+		ChunkIndex: 2,
+		Vector:     []float32{0.3, 0.7, 0}, // weakest match
+		ModelID:    "fake-model",
+		ChunkStart: 200,
+		ChunkEnd:   300,
+	}))
+
+	// Upsert a single chunk for "single-chunk.md".
+	require.NoError(t, fs.embRepo.DeleteForFile(ctx, "single-chunk.md"))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{
+		Filepath:   "single-chunk.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.9, 0}, // low match to query
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   50,
+	}))
+
+	// Override fake provider to return query vector [1, 0, 0].
+	fakeEmb.FixedVector = []float32{1, 0, 0}
+
+	results, err := fs.engine.Similar(ctx, search.SimilarInput{Text: "test query", Limit: 10})
+	require.NoError(t, err)
+
+	// Verify file-level deduplication: each file appears at most once.
+	assert.Len(t, results, 2, "should have exactly 2 results (one per file, not one per chunk)")
+
+	fileCount := make(map[string]int)
+	for _, r := range results {
+		fileCount[r.Filepath]++
+	}
+	assert.Equal(t, 1, fileCount["multi-chunk.md"], "multi-chunk.md should appear exactly once")
+	assert.Equal(t, 1, fileCount["single-chunk.md"], "single-chunk.md should appear exactly once")
+
+	// Verify multi-chunk.md ranks higher (its best chunk [0.9,0.1,0] is more similar
+	// to query [1,0,0] than single-chunk.md's [0.1,0.9,0]).
+	assert.Equal(t, "multi-chunk.md", results[0].Filepath, "multi-chunk file should rank first (best chunk score)")
+	assert.Greater(t, results[0].Score, results[1].Score, "best chunk score should be used for ranking")
+}
+
+// TestSimilarSearch_QueryPrefix exercises FR-5: query text is prefixed with
+// "search_query: " before being sent to the embedding provider.
+func TestSimilarSearch_QueryPrefix(t *testing.T) {
+	ctx := context.Background()
+
+	// Track the raw request bodies sent to the mock Ollama server.
+	var mu sync.Mutex
+	var capturedInputs []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Model string `json:"model"`
+			Input string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		mu.Lock()
+		capturedInputs = append(capturedInputs, req.Input)
+		mu.Unlock()
+
+		vec := []float32{0.1, 0.2, 0.3}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][][]float32{"embeddings": {vec}}) //nolint:errcheck // test
+	}))
+	defer server.Close()
+
+	ollamaEmb := embedding.NewOllamaProvider(server.URL, "nomic-embed-text")
+	fs := setupFullStack(t, ollamaEmb)
+
+	// Create a file so there is something to search against.
+	createTrackedFile(ctx, t, fs.testStack, "doc.md", "# Doc\nSome content.\n", "agent", []string{"doc"}, "a document")
+
+	// Clear captured inputs from file creation (which uses document prefix).
+	mu.Lock()
+	capturedInputs = nil
+	mu.Unlock()
+
+	// Perform a similarity search by text.
+	queryText := "how do I configure agents"
+	_, err := fs.engine.Similar(ctx, search.SimilarInput{Text: queryText, Limit: 5})
+	require.NoError(t, err)
+
+	// Verify the query was prefixed with "search_query: ".
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, capturedInputs, 1, "should have exactly 1 embedding call for the query")
+	assert.True(t, strings.HasPrefix(capturedInputs[0], "search_query: "),
+		"query input should be prefixed with 'search_query: ', got: %q", capturedInputs[0])
+	assert.Equal(t, "search_query: "+queryText, capturedInputs[0],
+		"query input should be 'search_query: ' + original query text")
+}
+
+// TestHardRebuild_RegeneratesChunks exercises FR-14: HardRebuild re-chunks
+// and re-embeds all files using the shared Generator.
+func TestHardRebuild_RegeneratesChunks(t *testing.T) {
+	ctx := context.Background()
+	fakeEmb := embtest.NewFakeProvider()
+	fs := setupFullStack(t, fakeEmb)
+
+	// Create files with content. The FakeProvider will generate embeddings.
+	createTrackedFile(ctx, t, fs.testStack, "file-a.md", "# File A\nContent for file A.\n", "agent", []string{"a"}, "file a")
+	createTrackedFile(ctx, t, fs.testStack, "file-b.md", "# File B\nContent for file B.\n", "agent", []string{"b"}, "file b")
+
+	// Delete all embeddings to simulate a state where embeddings are missing.
+	require.NoError(t, fs.embRepo.DeleteForFile(ctx, "file-a.md"))
+	require.NoError(t, fs.embRepo.DeleteForFile(ctx, "file-b.md"))
+
+	// Verify embeddings are gone.
+	allBefore, err := fs.embRepo.GetAll(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, allBefore, "embeddings should be empty before hard rebuild")
+
+	// Run hard rebuild. This should re-generate embeddings for both files.
+	_, err = fs.svc.HardRebuild(ctx)
+	require.NoError(t, err)
+
+	// Verify both files now have chunk embeddings.
+	chunksA, err := fs.embRepo.GetForFile(ctx, "file-a.md")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(chunksA), 1, "file-a.md should have at least 1 chunk embedding after hard rebuild")
+	for _, chunk := range chunksA {
+		assert.NotEmpty(t, chunk.Vector, "chunk vector should not be empty")
+		assert.Equal(t, "fake-model", chunk.ModelID, "chunk should use the fake model")
+	}
+
+	chunksB, err := fs.embRepo.GetForFile(ctx, "file-b.md")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, len(chunksB), 1, "file-b.md should have at least 1 chunk embedding after hard rebuild")
+	for _, chunk := range chunksB {
+		assert.NotEmpty(t, chunk.Vector, "chunk vector should not be empty")
+	}
+}
+
+// TestStatus_EmbeddingSchemaStale exercises FR-12: status reports when embeddings
+// are stale (v1-era single embeddings with chunk_start=0, chunk_end=0, chunk_index=0).
+func TestStatus_EmbeddingSchemaStale(t *testing.T) {
+	ctx := context.Background()
+	fakeEmb := embtest.NewFakeProvider()
+	fs := setupFullStack(t, fakeEmb)
+
+	// Create grimoire.md so status can refresh it.
+	docPath := fs.b.DocPath()
+	require.NoError(t, os.WriteFile(docPath, []byte("# placeholder\n"), 0o600))
+
+	// Create a tracked file.
+	createTrackedFile(ctx, t, fs.testStack, "stale-file.md", "# Stale\nOld content.\n", "agent", []string{"stale"}, "stale file")
+
+	// Replace its embeddings with a v1-style single embedding:
+	// chunk_index=0, chunk_start=0, chunk_end=0 (the stale indicator).
+	require.NoError(t, fs.embRepo.DeleteForFile(ctx, "stale-file.md"))
+	require.NoError(t, fs.embRepo.Upsert(ctx, store.Embedding{
+		Filepath:   "stale-file.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.2, 0.3},
+		ModelID:    "nomic-embed-text",
+		ChunkStart: 0, // v1-style: no chunk offsets
+		ChunkEnd:   0, // v1-style: no chunk offsets
+		IsSummary:  false,
+	}))
+
+	// Run status and verify it detects stale embeddings.
+	report, err := fs.svc.Status(ctx)
+	require.NoError(t, err)
+
+	assert.True(t, report.EmbeddingSchemaStale, "status should report stale embeddings for v1-era data")
+	assert.Contains(t, report.EmbeddingSchemaMessage, "hard-rebuild",
+		"stale message should suggest running hard-rebuild")
+	assert.Contains(t, report.EmbeddingSchemaMessage, "schema v1",
+		"stale message should mention schema v1")
 }
