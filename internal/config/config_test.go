@@ -10,6 +10,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// validConfig returns a Config with all fields set to valid values.
+func validConfig() *Config {
+	return &Config{
+		Embedding: EmbeddingConfig{
+			Provider:   "ollama",
+			Dimensions: 768,
+			Chunking: ChunkingConfig{
+				MaxTokens:     1024,
+				OverlapTokens: 128,
+				BytesPerToken: 4,
+			},
+		},
+		Search:  SearchConfig{DefaultLimit: 50},
+		Similar: SimilarConfig{DefaultLimit: 10},
+	}
+}
+
 func writeConfig(t *testing.T, content string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -142,75 +159,95 @@ embedding:
 }
 
 func TestValidate_validOllama(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "ollama", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Embedding.Provider = "ollama"
 	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_validNone(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "none", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Embedding.Provider = "none"
 	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_unknownProvider(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "openai", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Embedding.Provider = "openai"
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
 }
 
 func TestValidate_emptyProvider(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Embedding.Provider = ""
 	// Empty provider treated as "none" — should pass.
 	assert.NoError(t, cfg.Validate())
 }
 
 func TestValidate_invalidDimensions(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "ollama", Dimensions: 0},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Embedding.Dimensions = 0
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
 }
 
 func TestValidate_invalidSearchLimit(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "none", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 0},
-		Similar:   SimilarConfig{DefaultLimit: 10},
-	}
+	cfg := validConfig()
+	cfg.Search.DefaultLimit = 0
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
 }
 
 func TestValidate_invalidSimilarLimit(t *testing.T) {
-	cfg := &Config{
-		Embedding: EmbeddingConfig{Provider: "none", Dimensions: 768},
-		Search:    SearchConfig{DefaultLimit: 50},
-		Similar:   SimilarConfig{DefaultLimit: -1},
-	}
+	cfg := validConfig()
+	cfg.Similar.DefaultLimit = -1
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+func TestValidate_chunkingMaxTokensZero(t *testing.T) {
+	cfg := validConfig()
+	cfg.Embedding.Chunking.MaxTokens = 0
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+func TestValidate_chunkingBytesPerTokenZero(t *testing.T) {
+	cfg := validConfig()
+	cfg.Embedding.Chunking.BytesPerToken = 0
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+func TestValidate_chunkingOverlapNegative(t *testing.T) {
+	cfg := validConfig()
+	cfg.Embedding.Chunking.OverlapTokens = -1
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+func TestValidate_chunkingOverlapExceedsMax(t *testing.T) {
+	cfg := validConfig()
+	cfg.Embedding.Chunking.OverlapTokens = 1024
+	cfg.Embedding.Chunking.MaxTokens = 1024
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
+}
+
+func TestValidate_chunkingValidValues(t *testing.T) {
+	cfg := validConfig()
+	cfg.Embedding.Chunking.MaxTokens = 512
+	cfg.Embedding.Chunking.OverlapTokens = 64
+	cfg.Embedding.Chunking.BytesPerToken = 4
+	assert.NoError(t, cfg.Validate())
 }
 
 func TestEffectiveOllamaURL_configured(t *testing.T) {

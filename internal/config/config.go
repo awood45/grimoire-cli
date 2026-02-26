@@ -43,6 +43,8 @@ type SimilarConfig struct {
 	DefaultLimit int `yaml:"default_limit" mapstructure:"default_limit"`
 }
 
+const providerNone = "none"
+
 // Load reads config from the given YAML file path and applies defaults.
 func Load(path string) (*Config, error) {
 	v := viper.New()
@@ -50,7 +52,7 @@ func Load(path string) (*Config, error) {
 	v.SetConfigType("yaml")
 
 	// Defaults.
-	v.SetDefault("embedding.provider", "none")
+	v.SetDefault("embedding.provider", providerNone)
 	v.SetDefault("embedding.model", "nomic-embed-text")
 	v.SetDefault("embedding.dimensions", 768)
 	v.SetDefault("embedding.chunking.max_tokens", 1024)
@@ -77,10 +79,10 @@ func Load(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	provider := c.Embedding.Provider
 	if provider == "" {
-		provider = "none"
+		provider = providerNone
 	}
 
-	if provider != "ollama" && provider != "none" {
+	if provider != "ollama" && provider != providerNone {
 		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "unknown embedding provider: %q (must be \"ollama\" or \"none\")", c.Embedding.Provider)
 	}
 
@@ -94,6 +96,19 @@ func (c *Config) Validate() error {
 
 	if c.Similar.DefaultLimit <= 0 {
 		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "similar default_limit must be > 0, got %d", c.Similar.DefaultLimit)
+	}
+
+	if c.Embedding.Chunking.MaxTokens <= 0 {
+		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "chunking max_tokens must be > 0, got %d", c.Embedding.Chunking.MaxTokens)
+	}
+	if c.Embedding.Chunking.BytesPerToken <= 0 {
+		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "chunking bytes_per_token must be > 0, got %d", c.Embedding.Chunking.BytesPerToken)
+	}
+	if c.Embedding.Chunking.OverlapTokens < 0 {
+		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "chunking overlap_tokens must be >= 0, got %d", c.Embedding.Chunking.OverlapTokens)
+	}
+	if c.Embedding.Chunking.OverlapTokens >= c.Embedding.Chunking.MaxTokens {
+		return sberrors.Newf(sberrors.ErrCodeInvalidInput, "chunking overlap_tokens (%d) must be < max_tokens (%d)", c.Embedding.Chunking.OverlapTokens, c.Embedding.Chunking.MaxTokens)
 	}
 
 	return nil

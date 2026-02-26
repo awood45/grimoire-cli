@@ -277,6 +277,31 @@ func TestNewAppContext_dbOpenFailure(t *testing.T) {
 	require.Error(t, err)
 }
 
+// TestNewAppContext_freshDB_createsSchema verifies that MigrateIfNeeded creates
+// the v2 schema on a fresh (version 0) database during context creation (W-5).
+// This can happen when the grimoire directory exists but the DB was recreated.
+func TestNewAppContext_freshDB_createsSchema(t *testing.T) {
+	t.Parallel()
+
+	basePath := t.TempDir()
+	setupGrimoire(t, basePath, nil)
+
+	// Delete the existing DB and create a fresh empty one.
+	dbPath := filepath.Join(basePath, "db", "grimoire.sqlite")
+	require.NoError(t, os.Remove(dbPath))
+
+	// Create a fresh empty DB (no schema, user_version=0).
+	freshDB, err := store.NewDB(dbPath)
+	require.NoError(t, err)
+	require.NoError(t, freshDB.Close())
+
+	// NewAppContext should succeed — MigrateIfNeeded creates schema for fresh DB.
+	ctx, err := NewAppContext(basePath)
+	require.NoError(t, err, "NewAppContext should handle fresh DB by creating schema via MigrateIfNeeded")
+	require.NotNil(t, ctx)
+	assert.NoError(t, ctx.Close())
+}
+
 // TestNewAppContext_emptyEmbeddingProvider verifies empty string maps to noop.
 func TestNewAppContext_emptyEmbeddingProvider(t *testing.T) {
 	t.Parallel()

@@ -421,6 +421,33 @@ func TestUpdate_noChanges(t *testing.T) {
 	assert.True(t, sberrors.HasCode(err, sberrors.ErrCodeInvalidInput))
 }
 
+// TestUpdate_onlySummaryEmbeddingText tests that setting only SummaryEmbeddingText
+// is recognized as a change (W-1 review fix).
+func TestUpdate_onlySummaryEmbeddingText(t *testing.T) {
+	h := newTestHarness(t)
+	h.createTestFile(t, "notes/test.md", "# Test\n\nContent")
+
+	ctx := context.Background()
+	// First create the metadata.
+	_, err := h.mgr.Create(ctx, CreateOptions{
+		Filepath:    "notes/test.md",
+		SourceAgent: "test-agent",
+		Tags:        []string{"go"},
+		Summary:     "A test file",
+	})
+	require.NoError(t, err)
+
+	// Now update with only SummaryEmbeddingText — should NOT be rejected.
+	summaryText := "AI-generated summary of the file"
+	opts := UpdateOptions{
+		Filepath:             "notes/test.md",
+		SummaryEmbeddingText: &summaryText,
+	}
+
+	_, err = h.mgr.Update(ctx, opts)
+	require.NoError(t, err, "Update with only SummaryEmbeddingText should be accepted as a change")
+}
+
 // TestUpdate_rebuildInProgress tests FR-3.2.2: lock contention.
 func TestUpdate_rebuildInProgress(t *testing.T) {
 	h := newTestHarness(t)

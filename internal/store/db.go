@@ -130,6 +130,9 @@ func (d *DB) currentVersion() (int, error) {
 
 // MigrateIfNeeded checks the current schema version and runs migrations if necessary.
 // Returns nil if already at the current version.
+// For fresh databases (version 0), this creates the v2 schema directly via EnsureSchema.
+// This dual role is intentional: it allows non-init commands to self-heal if the DB
+// exists but has no schema (e.g., after a DB recreation).
 func (d *DB) MigrateIfNeeded() error {
 	current, err := d.currentVersion()
 	if err != nil {
@@ -162,7 +165,6 @@ func (d *DB) migrateV1ToV2() error {
 		migrateEmbeddingsCopyV1,
 		migrateEmbeddingsDropV1,
 		migrateEmbeddingsRenameV2,
-		fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion),
 	}
 
 	for _, stmt := range steps {
@@ -173,6 +175,13 @@ func (d *DB) migrateV1ToV2() error {
 
 	if err := tx.Commit(); err != nil {
 		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to commit migration transaction")
+	}
+
+	// Bump schema version only after the DDL changes committed successfully.
+	// This is done outside the transaction to ensure the version is never bumped
+	// without the corresponding schema changes persisting.
+	if _, err := d.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", SchemaVersion)); err != nil {
+		return sberrors.Wrap(err, sberrors.ErrCodeDatabaseError, "failed to set schema version after migration")
 	}
 
 	return nil

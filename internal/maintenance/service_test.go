@@ -2128,6 +2128,63 @@ func TestStatus_embeddingSchemaStale_mixedEmbeddings_FR12(t *testing.T) {
 	}
 }
 
+// TestStatus_embeddingNotStale_singleChunkSmallFile_FR12 verifies that a v2
+// single-chunk embedding (chunk_start=0, chunk_end>0) is NOT flagged as stale.
+// This guards against false positives in the stale detection heuristic (W-2).
+func TestStatus_embeddingNotStale_singleChunkSmallFile_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// A v2 single-chunk embedding for a small file: chunk_index=0, chunk_start=0,
+	// but chunk_end=13 (the file is 13 bytes).
+	h.embRepo.Data["small.md"] = []store.Embedding{{
+		Filepath:   "small.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.1, 0.2},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   13,
+	}}
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = true, want false for v2 single-chunk embedding with chunk_end > 0")
+	}
+}
+
+// TestStatus_embeddingNotStale_summaryWithZeroOffsets_FR12 verifies that
+// summary embeddings with zero offsets are not flagged as stale (W-2 defense).
+// Summary embeddings are stored with chunk_start=0, chunk_end=0 by design
+// since they represent AI-generated text, not a file byte range.
+func TestStatus_embeddingNotStale_summaryWithZeroOffsets_FR12(t *testing.T) {
+	h := newTestHarness(t)
+	ctx := context.Background()
+
+	// Only embedding is a summary with zero offsets — must NOT be flagged stale.
+	h.embRepo.Data["summary-only.md"] = []store.Embedding{{
+		Filepath:   "summary-only.md",
+		ChunkIndex: 0,
+		Vector:     []float32{0.3, 0.4},
+		ModelID:    "fake-model",
+		ChunkStart: 0,
+		ChunkEnd:   0,
+		IsSummary:  true,
+	}}
+
+	report, err := h.svc.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+
+	if report.EmbeddingSchemaStale {
+		t.Error("EmbeddingSchemaStale = true, want false — summary embeddings should not trigger stale detection")
+	}
+}
+
 // TestHardRebuild_usesGenerator_FR14 verifies FR-14: HardRebuild uses Generator for embedding generation.
 func TestHardRebuild_usesGenerator_FR14(t *testing.T) {
 	h := newTestHarness(t)

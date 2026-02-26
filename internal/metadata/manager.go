@@ -325,6 +325,9 @@ func hasChanges(opts *UpdateOptions) bool {
 	if opts.Summary != nil {
 		return true
 	}
+	if opts.SummaryEmbeddingText != nil {
+		return true
+	}
 	return false
 }
 

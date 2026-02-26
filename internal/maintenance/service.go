@@ -162,8 +162,10 @@ func (s *Service) fillDBAndEmbeddingStatus(report *StatusReport) {
 }
 
 // detectStaleEmbeddings checks for v1-era embeddings that need re-generation (FR-12).
-// Stale embeddings have chunk_start=0, chunk_end=0, and chunk_index=0 which indicates
-// they were generated before the chunking pipeline was introduced.
+// V1 embeddings are identified by chunk_end == 0: the v2 Generator always sets chunk_end
+// to the actual byte offset (> 0 for any non-empty content), while v1 embeddings default
+// to 0 during migration. Summary embeddings (IsSummary=true) are excluded because they
+// represent AI-generated text and legitimately have zero byte-range offsets.
 func (s *Service) detectStaleEmbeddings(ctx context.Context, report *StatusReport) {
 	allEmbs, err := s.embRepo.GetAll(ctx)
 	if err != nil {
@@ -173,7 +175,7 @@ func (s *Service) detectStaleEmbeddings(ctx context.Context, report *StatusRepor
 
 	for i := range allEmbs {
 		emb := &allEmbs[i]
-		if emb.ChunkIndex == 0 && emb.ChunkStart == 0 && emb.ChunkEnd == 0 {
+		if !emb.IsSummary && emb.ChunkIndex == 0 && emb.ChunkStart == 0 && emb.ChunkEnd == 0 {
 			report.EmbeddingSchemaStale = true
 			report.EmbeddingSchemaMessage = "Embeddings were generated with schema v1. Run 'grimoire-cli hard-rebuild' to re-generate with chunking and prefixes."
 			return
