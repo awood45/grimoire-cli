@@ -22,6 +22,7 @@ const (
 	ErrCodeDatabaseError       ErrorCode = "DATABASE_ERROR"
 	ErrCodeLedgerError         ErrorCode = "LEDGER_ERROR"
 	ErrCodeEmbeddingError      ErrorCode = "EMBEDDING_ERROR"
+	ErrCodeEmbeddingWarning    ErrorCode = "EMBEDDING_WARNING"
 	ErrCodeSchemaVersion       ErrorCode = "SCHEMA_VERSION_MISMATCH"
 	ErrCodeInternalError       ErrorCode = "INTERNAL_ERROR"
 )

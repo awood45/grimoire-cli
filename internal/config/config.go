@@ -13,13 +13,24 @@ type Config struct {
 	Similar   SimilarConfig   `yaml:"similar" mapstructure:"similar"`
 }
 
+// ChunkingConfig holds chunking parameters for splitting file content into
+// overlapping chunks before embedding.
+type ChunkingConfig struct {
+	MaxTokens     int `yaml:"max_tokens" mapstructure:"max_tokens"`
+	OverlapTokens int `yaml:"overlap_tokens" mapstructure:"overlap_tokens"`
+	BytesPerToken int `yaml:"bytes_per_token" mapstructure:"bytes_per_token"`
+}
+
 // EmbeddingConfig holds embedding provider configuration.
 type EmbeddingConfig struct {
-	Provider   string `yaml:"provider" mapstructure:"provider"`
-	Model      string `yaml:"model" mapstructure:"model"`
-	APIKeyEnv  string `yaml:"api_key_env" mapstructure:"api_key_env"`
-	Dimensions int    `yaml:"dimensions" mapstructure:"dimensions"`
-	OllamaURL  string `yaml:"ollama_url" mapstructure:"ollama_url"`
+	Provider       string         `yaml:"provider" mapstructure:"provider"`
+	Model          string         `yaml:"model" mapstructure:"model"`
+	APIKeyEnv      string         `yaml:"api_key_env" mapstructure:"api_key_env"`
+	Dimensions     int            `yaml:"dimensions" mapstructure:"dimensions"`
+	OllamaURL      string         `yaml:"ollama_url" mapstructure:"ollama_url"`
+	Chunking       ChunkingConfig `yaml:"chunking" mapstructure:"chunking"`
+	DocumentPrefix string         `yaml:"document_prefix" mapstructure:"document_prefix"`
+	QueryPrefix    string         `yaml:"query_prefix" mapstructure:"query_prefix"`
 }
 
 // SearchConfig holds search defaults.
@@ -42,6 +53,11 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("embedding.provider", "none")
 	v.SetDefault("embedding.model", "nomic-embed-text")
 	v.SetDefault("embedding.dimensions", 768)
+	v.SetDefault("embedding.chunking.max_tokens", 1024)
+	v.SetDefault("embedding.chunking.overlap_tokens", 128)
+	v.SetDefault("embedding.chunking.bytes_per_token", 4)
+	v.SetDefault("embedding.document_prefix", "search_document: ")
+	v.SetDefault("embedding.query_prefix", "search_query: ")
 	v.SetDefault("search.default_limit", 50)
 	v.SetDefault("similar.default_limit", 10)
 
@@ -84,7 +100,7 @@ func (c *Config) Validate() error {
 }
 
 // EffectiveOllamaURL returns the configured Ollama URL or the default.
-func (e EmbeddingConfig) EffectiveOllamaURL() string {
+func (e *EmbeddingConfig) EffectiveOllamaURL() string {
 	if e.OllamaURL != "" {
 		return e.OllamaURL
 	}

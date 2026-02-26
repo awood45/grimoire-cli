@@ -75,6 +75,7 @@ func TestAllErrorCodes_defined(t *testing.T) {
 		ErrCodeDatabaseError:       "DATABASE_ERROR",
 		ErrCodeLedgerError:         "LEDGER_ERROR",
 		ErrCodeEmbeddingError:      "EMBEDDING_ERROR",
+		ErrCodeEmbeddingWarning:    "EMBEDDING_WARNING",
 		ErrCodeSchemaVersion:       "SCHEMA_VERSION_MISMATCH",
 		ErrCodeInternalError:       "INTERNAL_ERROR",
 	}
