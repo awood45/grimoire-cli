@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -585,6 +587,129 @@ func TestInit_withForce(t *testing.T) {
 	}
 	if !sberrors.HasCode(err, sberrors.ErrCodeAlreadyInitialized) {
 		t.Errorf("Expected ALREADY_INITIALIZED, got: %v", err)
+	}
+}
+
+// TestCreateEmbedding_LargeFile_OllamaContextLimit replicates a bug where
+// large files silently fail to generate embeddings. Ollama returns HTTP 500
+// with "the input length exceeds the context length" for prompts that exceed
+// the model's token limit. The manager's generateEmbedding method silently
+// swallows the error, so Create succeeds but no embedding is stored.
+//
+// This test uses a mock Ollama server that mimics the real behavior: succeed
+// for small inputs, return 500 for inputs exceeding a token threshold. It
+// asserts that both small and large files should have embeddings after Create.
+func TestCreateEmbedding_LargeFile_OllamaContextLimit(t *testing.T) {
+	ctx := context.Background()
+
+	// Token limit threshold (in bytes). The real nomic-embed-text model has
+	// a 2048-token context window; Ollama returns 500 when exceeded.
+	// We use a conservative byte threshold here to simulate the behavior.
+	const contextLimitBytes = 4000
+
+	// Mock Ollama server: returns a valid embedding for small inputs,
+	// 500 error for inputs that exceed the context limit.
+	type ollamaReq struct {
+		Model  string `json:"model"`
+		Prompt string `json:"prompt"`
+	}
+	type ollamaResp struct {
+		Embedding []float32 `json:"embedding"`
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollamaReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if len(req.Prompt) > contextLimitBytes {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+				"error": "the input length exceeds the context length",
+			})
+			return
+		}
+
+		// Return a deterministic 768-dimension embedding.
+		vec := make([]float32, 768)
+		for i := range vec {
+			vec[i] = 0.01 * float32(i)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ollamaResp{Embedding: vec}) //nolint:errcheck
+	}))
+	defer server.Close()
+
+	// Create OllamaProvider pointing at mock server.
+	ollamaEmb := embedding.NewOllamaProvider(server.URL, "nomic-embed-text")
+
+	// Set up a full test stack with the real OllamaProvider.
+	ts := setupTestStack(t, ollamaEmb)
+
+	// --- Small file: under the context limit ---
+	smallContent := "# Quick Research\n\nA short note about Microsoft Graph API.\n"
+	smallPath := "research-quick/small-note.md"
+	createTestFile(t, ts.b, smallPath, smallContent)
+
+	_, err := ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:    smallPath,
+		SourceAgent: "quick-researcher",
+		Tags:        []string{"type/quick-research"},
+		Summary:     "Small research note",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for small file: %v", err)
+	}
+
+	// Verify the small file has an embedding.
+	embRepo := store.NewSQLiteEmbeddingRepository(ts.db)
+	smallEmb, err := embRepo.Get(ctx, smallPath)
+	if err != nil {
+		t.Fatalf("Small file should have an embedding: %v", err)
+	}
+	if len(smallEmb.Vector) != 768 {
+		t.Errorf("Small file vector length = %d, want 768", len(smallEmb.Vector))
+	}
+
+	// --- Large file: exceeds the context limit ---
+	// Generate a realistic large document (~10KB, well over the 4KB threshold).
+	var largeBuilder strings.Builder
+	largeBuilder.WriteString("# Deep Research: Agent Teams Workflow Implementation Guide\n\n")
+	for i := 0; i < 200; i++ {
+		largeBuilder.WriteString("## Section " + string(rune('A'+i%26)) + "\n\n")
+		largeBuilder.WriteString("This section covers the implementation details for configuring agent teams ")
+		largeBuilder.WriteString("in a production workflow. The key considerations include task decomposition, ")
+		largeBuilder.WriteString("parallel execution strategies, and error handling patterns.\n\n")
+	}
+	largeContent := largeBuilder.String()
+	if len(largeContent) <= contextLimitBytes {
+		t.Fatalf("Test setup: large content (%d bytes) should exceed context limit (%d bytes)", len(largeContent), contextLimitBytes)
+	}
+
+	largePath := "research-deep/deep-research/large-guide.md"
+	createTestFile(t, ts.b, largePath, largeContent)
+
+	_, err = ts.mgr.Create(ctx, metadata.CreateOptions{
+		Filepath:    largePath,
+		SourceAgent: "researcher",
+		Tags:        []string{"type/deep-research"},
+		Summary:     "Large research guide",
+	})
+	if err != nil {
+		t.Fatalf("Manager.Create() error for large file: %v", err)
+	}
+
+	// Verify the large file ALSO has an embedding.
+	// BUG: This assertion fails because Ollama returns 500 for the large
+	// file and manager.generateEmbedding silently swallows the error.
+	largeEmb, err := embRepo.Get(ctx, largePath)
+	if err != nil {
+		t.Fatalf("Large file should have an embedding, but got error: %v", err)
+	}
+	if len(largeEmb.Vector) == 0 {
+		t.Error("Large file embedding vector should not be empty")
 	}
 }
 
