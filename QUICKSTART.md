@@ -30,6 +30,30 @@ Verify it works:
 grimoire-cli --help
 ```
 
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/awood45/grimoire-cli.git
+cd grimoire-cli
+go install ./cmd/grimoire-cli
+```
+
+This places `grimoire-cli.exe` in `$env:GOPATH\bin` (usually `%USERPROFILE%\go\bin`). The Go installer typically adds this to your PATH. If not, add it:
+
+```powershell
+# Check if it's already on your PATH
+go env GOPATH
+
+# If needed, add to your user PATH permanently
+[Environment]::SetEnvironmentVariable("Path", "$env:Path;$(go env GOPATH)\bin", "User")
+```
+
+Verify it works:
+
+```powershell
+grimoire-cli --help
+```
+
 ## Tour
 
 ### 1. Initialize a grimoire
