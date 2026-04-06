@@ -4,6 +4,7 @@ package filelock
 
 import (
 	"os"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
@@ -12,7 +13,8 @@ import (
 // Each instance opens its own file descriptor, so separate instances
 // on the same file correctly contend across processes.
 type FlockLocker struct {
-	file *os.File
+	file    *os.File
+	rawConn syscall.RawConn
 }
 
 // Compile-time interface check.
@@ -25,7 +27,12 @@ func NewFlockLocker(path string) (*FlockLocker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FlockLocker{file: f}, nil
+	rc, err := f.SyscallConn()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &FlockLocker{file: f, rawConn: rc}, nil
 }
 
 func (l *FlockLocker) TryLockShared() (bool, error) {
@@ -49,22 +56,36 @@ func (l *FlockLocker) Close() error {
 	return l.file.Close()
 }
 
-// tryLock attempts a non-blocking lock with the given flags via LockFileEx.
+// tryLock attempts a non-blocking lock via SyscallConn and LockFileEx.
+// Using SyscallConn avoids the blocking-mode side effect of os.File.Fd().
 // Returns (true, nil) on success, (false, nil) if the lock is already held,
 // and (false, err) on unexpected errors.
 func (l *FlockLocker) tryLock(flags uint32) (bool, error) {
-	ol := new(windows.Overlapped)
-	err := windows.LockFileEx(windows.Handle(l.file.Fd()), flags, 0, 1, 0, ol)
-	if err == nil {
-		return true, nil
+	var lockErr error
+	acquired := false
+	controlErr := l.rawConn.Control(func(fd uintptr) {
+		ol := &windows.Overlapped{}
+		e := windows.LockFileEx(windows.Handle(fd), flags, 0, 1, 0, ol)
+		if e == nil {
+			acquired = true
+		} else if e != windows.ERROR_LOCK_VIOLATION {
+			lockErr = e
+		}
+	})
+	if controlErr != nil {
+		return false, controlErr
 	}
-	if err == windows.ERROR_LOCK_VIOLATION {
-		return false, nil
-	}
-	return false, err
+	return acquired, lockErr
 }
 
 func (l *FlockLocker) unlock() error {
-	ol := new(windows.Overlapped)
-	return windows.UnlockFileEx(windows.Handle(l.file.Fd()), 0, 1, 0, ol)
+	var unlockErr error
+	controlErr := l.rawConn.Control(func(fd uintptr) {
+		ol := &windows.Overlapped{}
+		unlockErr = windows.UnlockFileEx(windows.Handle(fd), 0, 1, 0, ol)
+	})
+	if controlErr != nil {
+		return controlErr
+	}
+	return unlockErr
 }
