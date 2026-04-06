@@ -11,7 +11,8 @@ import (
 // Each instance opens its own file descriptor, so separate instances
 // on the same file correctly contend across processes.
 type FlockLocker struct {
-	file *os.File
+	file    *os.File
+	rawConn syscall.RawConn
 }
 
 // Compile-time interface check.
@@ -24,7 +25,12 @@ func NewFlockLocker(path string) (*FlockLocker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &FlockLocker{file: f}, nil
+	rc, err := f.SyscallConn()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &FlockLocker{file: f, rawConn: rc}, nil
 }
 
 func (l *FlockLocker) TryLockShared() (bool, error) {
@@ -32,7 +38,7 @@ func (l *FlockLocker) TryLockShared() (bool, error) {
 }
 
 func (l *FlockLocker) UnlockShared() error {
-	return syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	return l.unlock()
 }
 
 func (l *FlockLocker) TryLockExclusive() (bool, error) {
@@ -40,7 +46,7 @@ func (l *FlockLocker) TryLockExclusive() (bool, error) {
 }
 
 func (l *FlockLocker) UnlockExclusive() error {
-	return syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	return l.unlock()
 }
 
 // Close releases the file descriptor and any held lock.
@@ -48,16 +54,34 @@ func (l *FlockLocker) Close() error {
 	return l.file.Close()
 }
 
-// tryFlock attempts a non-blocking flock with the given flags.
+// tryFlock attempts a non-blocking flock via SyscallConn, which does not alter
+// the file's blocking mode — unlike os.File.Fd() which clears O_NONBLOCK.
 // Returns (true, nil) on success, (false, nil) if the lock is held,
 // and (false, err) on unexpected errors.
 func (l *FlockLocker) tryFlock(how int) (bool, error) {
-	err := syscall.Flock(int(l.file.Fd()), how)
-	if err == nil {
-		return true, nil
+	var flockErr error
+	acquired := false
+	controlErr := l.rawConn.Control(func(fd uintptr) {
+		e := syscall.Flock(int(fd), how)
+		if e == nil {
+			acquired = true
+		} else if e != syscall.EWOULDBLOCK {
+			flockErr = e
+		}
+	})
+	if controlErr != nil {
+		return false, controlErr
 	}
-	if err == syscall.EWOULDBLOCK {
-		return false, nil
+	return acquired, flockErr
+}
+
+func (l *FlockLocker) unlock() error {
+	var unlockErr error
+	controlErr := l.rawConn.Control(func(fd uintptr) {
+		unlockErr = syscall.Flock(int(fd), syscall.LOCK_UN)
+	})
+	if controlErr != nil {
+		return controlErr
 	}
-	return false, err
+	return unlockErr
 }
