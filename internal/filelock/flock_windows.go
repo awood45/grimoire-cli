@@ -1,13 +1,14 @@
-//go:build !windows
+//go:build windows
 
 package filelock
 
 import (
 	"os"
-	"syscall"
+
+	"golang.org/x/sys/windows"
 )
 
-// FlockLocker implements Locker using POSIX advisory file locks (flock).
+// FlockLocker implements Locker using Windows LockFileEx advisory file locks.
 // Each instance opens its own file descriptor, so separate instances
 // on the same file correctly contend across processes.
 type FlockLocker struct {
@@ -28,19 +29,19 @@ func NewFlockLocker(path string) (*FlockLocker, error) {
 }
 
 func (l *FlockLocker) TryLockShared() (bool, error) {
-	return l.tryFlock(syscall.LOCK_SH | syscall.LOCK_NB)
+	return l.tryLock(windows.LOCKFILE_FAIL_IMMEDIATELY)
 }
 
 func (l *FlockLocker) UnlockShared() error {
-	return syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	return l.unlock()
 }
 
 func (l *FlockLocker) TryLockExclusive() (bool, error) {
-	return l.tryFlock(syscall.LOCK_EX | syscall.LOCK_NB)
+	return l.tryLock(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
 }
 
 func (l *FlockLocker) UnlockExclusive() error {
-	return syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
+	return l.unlock()
 }
 
 // Close releases the file descriptor and any held lock.
@@ -48,16 +49,22 @@ func (l *FlockLocker) Close() error {
 	return l.file.Close()
 }
 
-// tryFlock attempts a non-blocking flock with the given flags.
-// Returns (true, nil) on success, (false, nil) if the lock is held,
+// tryLock attempts a non-blocking lock with the given flags via LockFileEx.
+// Returns (true, nil) on success, (false, nil) if the lock is already held,
 // and (false, err) on unexpected errors.
-func (l *FlockLocker) tryFlock(how int) (bool, error) {
-	err := syscall.Flock(int(l.file.Fd()), how)
+func (l *FlockLocker) tryLock(flags uint32) (bool, error) {
+	ol := new(windows.Overlapped)
+	err := windows.LockFileEx(windows.Handle(l.file.Fd()), flags, 0, 1, 0, ol)
 	if err == nil {
 		return true, nil
 	}
-	if err == syscall.EWOULDBLOCK {
+	if err == windows.ERROR_LOCK_VIOLATION {
 		return false, nil
 	}
 	return false, err
+}
+
+func (l *FlockLocker) unlock() error {
+	ol := new(windows.Overlapped)
+	return windows.UnlockFileEx(windows.Handle(l.file.Fd()), 0, 1, 0, ol)
 }
